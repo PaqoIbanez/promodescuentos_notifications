@@ -1,1 +1,1 @@
-web: chmod +x build.sh && ./build.sh && python scrape_promodescuentos.py 
+web: docker build -t promodescuentos . && docker run promodescuentos 

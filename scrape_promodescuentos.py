@@ -229,7 +229,11 @@ def init_driver() -> webdriver.Chrome:
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.binary_location = "/usr/bin/google-chrome"
+    
+    # Configurar el servicio de ChromeDriver
     service = Service(ChromeDriverManager().install())
+    
+    # Inicializar el driver
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
