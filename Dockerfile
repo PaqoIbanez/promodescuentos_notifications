@@ -29,5 +29,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el código fuente
 COPY . .
 
+# Exponer el puerto para el health check
+EXPOSE 10000
+
 # Comando para ejecutar la aplicación
 CMD ["python", "scrape_promodescuentos.py"] 

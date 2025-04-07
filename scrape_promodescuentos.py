@@ -20,6 +20,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 # ===== CONFIGURACIÓN =====
 
 # Cargar variables de entorno desde un archivo .env
@@ -367,11 +370,32 @@ def filter_new_hot_deals(deals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ===== FUNCION PRINCIPAL =====
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        response = {
+            'status': 'running',
+            'service': 'promodescuentos-scraper'
+        }
+        self.wfile.write(json.dumps(response).encode())
+
+def run_health_server():
+    server_address = ('0.0.0.0', 10000)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    httpd.serve_forever()
+
 def main() -> None:
     """
     Función principal que ejecuta el scraper en un loop, filtra y envía las ofertas válidas a Telegram.
     Se reenvía la oferta si su rating actual es mayor que el registrado anteriormente.
     """
+    # Iniciar el servidor de health check en un hilo separado
+    health_thread = threading.Thread(target=run_health_server)
+    health_thread.daemon = True
+    health_thread.start()
+
     seen_deals: Dict[str, int] = load_seen_deals(SEEN_FILE)
     logging.info("Inicio del proceso de scraping de Promodescuentos Hot.")
 

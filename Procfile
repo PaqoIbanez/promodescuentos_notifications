@@ -1,1 +1,1 @@
-web: docker build -t promodescuentos . && docker run promodescuentos 
+web: docker build -t promodescuentos . && docker run -p 10000:10000 promodescuentos 
