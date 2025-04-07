@@ -1,1 +1,1 @@
-web: sh build.sh && python scrape_promodescuentos.py 
+web: chmod +x build.sh && ./build.sh && python scrape_promodescuentos.py 
