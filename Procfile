@@ -1,1 +1,1 @@
-web: python scrape_promodescuentos.py 
+web: sh build.sh && python scrape_promodescuentos.py 
