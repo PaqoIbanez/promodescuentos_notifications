@@ -21,7 +21,8 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, SimpleHTTPRequestHandler
+import mimetypes
 
 # ===== CONFIGURACIÓN =====
 
@@ -396,20 +397,68 @@ def filter_new_hot_deals(deals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ===== FUNCION PRINCIPAL =====
 
+class DebugFileHandler(SimpleHTTPRequestHandler):
+    """Handler para servir archivos estáticos desde el directorio de depuración."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory="/app/debug", **kwargs)
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Handler para el health check y para servir archivos de depuración."""
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        response = {
-            'status': 'running',
-            'service': 'promodescuentos-scraper'
-        }
-        self.wfile.write(json.dumps(response).encode())
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'running',
+                'service': 'promodescuentos-scraper'
+            }
+            self.wfile.write(json.dumps(response).encode())
+        elif self.path.startswith('/debug/'):
+            # Intenta servir un archivo específico desde /app/debug
+            file_path = self.path[1:] # Quita el primer '/' -> 'debug/filename.html'
+            full_path = os.path.join("/app", file_path) # Construye la ruta completa
+
+            if os.path.isfile(full_path):
+                try:
+                    with open(full_path, 'rb') as f:
+                        self.send_response(200)
+                        mime_type, _ = mimetypes.guess_type(full_path)
+                        self.send_header('Content-type', mime_type or 'application/octet-stream')
+                        self.end_headers()
+                        self.wfile.write(f.read())
+                except IOError:
+                    self.send_error(404, f"Error al leer el archivo: {file_path}")
+            else:
+                self.send_error(404, f"Archivo no encontrado: {file_path}")
+        elif self.path == '/debug':
+             # Lista los archivos en /app/debug
+            debug_dir = "/app/debug"
+            if os.path.isdir(debug_dir):
+                try:
+                    files = os.listdir(debug_dir)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    # Usar encode('utf-8') para los strings HTML
+                    self.wfile.write("<html><head><title>Archivos de Depuración</title></head>".encode('utf-8'))
+                    self.wfile.write("<body><h1>Archivos en /app/debug</h1><ul>".encode('utf-8'))
+                    for file in sorted(files):
+                        if file.endswith(".html"):
+                            link_html = f'<li><a href="/debug/{file}">{file}</a></li>'
+                            self.wfile.write(link_html.encode('utf-8'))
+                    self.wfile.write("</ul></body></html>".encode('utf-8'))
+                except OSError:
+                    self.send_error(500, "Error al listar el directorio de depuración")
+            else:
+                 self.send_error(404, "Directorio de depuración no encontrado")
+        else:
+            self.send_error(404, "Ruta no encontrada")
 
 def run_health_server():
     server_address = ('0.0.0.0', 10000)
     httpd = HTTPServer(server_address, HealthCheckHandler)
+    logging.info(f"Servidor HTTP iniciado en {server_address[0]}:{server_address[1]}")
     httpd.serve_forever()
 
 def main() -> None:
