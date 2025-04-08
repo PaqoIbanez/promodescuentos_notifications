@@ -264,15 +264,20 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
         logging.info(f"Accediendo a la URL: {url}")
         driver.get(url)
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(2)
+        # Incrementar un poco la espera por si el contenido tarda en cargar dinámicamente
+        time.sleep(5) 
         html = driver.page_source
         
-        # Guardar el HTML para depuración
+        # Guardar el HTML para depuración en el directorio /app/debug
+        debug_dir = "/app/debug"
+        # Asegurarse que el directorio existe (aunque ya se crea en Dockerfile)
+        os.makedirs(debug_dir, exist_ok=True) 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        debug_file = f"debug_html_{timestamp}.html"
-        with open(debug_file, "w", encoding="utf-8") as f:
+        # Construir la ruta completa al archivo de depuración
+        debug_file_path = os.path.join(debug_dir, f"debug_html_{timestamp}.html") 
+        with open(debug_file_path, "w", encoding="utf-8") as f:
             f.write(html)
-        logging.info(f"HTML guardado en {debug_file}")
+        logging.info(f"HTML guardado en {debug_file_path}")
         
     except Exception as e:
         logging.exception("Error scraping: %s", e)
