@@ -20,6 +20,9 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key
 # Configurar el directorio de trabajo
 WORKDIR /app
 
+# Crear directorio para logs y archivos de depuración
+RUN mkdir -p /app/debug
+
 # Copiar los archivos de requisitos
 COPY requirements.txt .
 

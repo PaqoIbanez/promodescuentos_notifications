@@ -260,10 +260,19 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
     url = "https://www.promodescuentos.com/nuevas"
     html = ""
     try:
+        logging.info(f"Accediendo a la URL: {url}")
         driver.get(url)
         WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(2)
         html = driver.page_source
+        
+        # Guardar el HTML para depuración
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        debug_file = f"debug_html_{timestamp}.html"
+        with open(debug_file, "w", encoding="utf-8") as f:
+            f.write(html)
+        logging.info(f"HTML guardado en {debug_file}")
+        
     except Exception as e:
         logging.exception("Error scraping: %s", e)
     return html
@@ -272,101 +281,118 @@ def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
     """
     Parsea el HTML con BeautifulSoup y extrae la información de las ofertas.
     """
+    logging.info("Iniciando parseo de ofertas...")
     articles = soup.select("article.thread")
+    logging.info(f"Se encontraron {len(articles)} artículos en total")
+    
     deals_data: List[Dict[str, Any]] = []
     for art in articles:
-        temp_element = art.select_one(".cept-vote-temp")
-        if not temp_element:
+        try:
+            temp_element = art.select_one(".cept-vote-temp")
+            if not temp_element:
+                logging.debug("No se encontró elemento de temperatura")
+                continue
+                
+            temp_text = temp_element.get_text(strip=True)
+            m_temp = re.search(r"(\d+(\.\d+)?)", temp_text)
+            if not m_temp:
+                logging.debug(f"No se pudo extraer temperatura del texto: {temp_text}")
+                continue
+                
+            temperature = float(m_temp.group(1))
+            logging.debug(f"Temperatura encontrada: {temperature}")
+            
+            time_ribbon = art.select_one(".chip--type-default span.size--all-s")
+            if not time_ribbon:
+                continue
+            posted_text = time_ribbon.get_text(strip=True)
+            posted_or_updated = "Publicado"
+            if "Actualizado" in posted_text:
+                posted_or_updated = "Actualizado"
+
+            hours = 0
+            minutes = 0
+            days = 0
+            m_days = re.search(r"hace\s*(\d+)\s*d", posted_text)
+            if m_days:
+                days = int(m_days.group(1))
+            m_hrs = re.search(r"hace\s*(\d+)\s*h", posted_text)
+            if m_hrs:
+                hours = int(m_hrs.group(1))
+            m_min = re.search(r"hace\s*(\d+)\s*m", posted_text)
+            if m_min:
+                minutes = int(m_min.group(1))
+            total_hours = (days * 24) + hours + (minutes / 60.0)
+
+            title_element = art.select_one(".cept-tt.thread-link")
+            if not title_element:
+                continue
+            title = title_element.get_text(strip=True)
+            link = title_element["href"] if title_element.has_attr("href") else ""
+            if link.startswith("/"):
+                link = "https://www.promodescuentos.com" + link
+
+            merchant_element = art.select_one(".threadListCard-body a.link.color--text-NeutralSecondary")
+            merchant = merchant_element.get_text(strip=True) if merchant_element else "Unknown"
+
+            price_element = art.select_one(".thread-price")
+            price_display = price_element.get_text(strip=True) if price_element else None
+            if not price_display:
+                price_display = "Unknown"
+
+            discount_percentage = None
+            discount_badge = art.select_one(".textBadge--green")
+            if discount_badge:
+                discount_text = discount_badge.get_text(strip=True)
+                m_discount = re.search(r"-(\d+)%", discount_text)
+                if m_discount:
+                    discount_percentage = f"{m_discount.group(1)}%"
+
+            # Extraer URL de la imagen
+            image_element = art.select_one(".threadListCard-image img.thread-image")
+            image_url = image_element['src'] if image_element and image_element.has_attr('src') else 'No Image'
+            logging.debug("Extracted image URL: %s", image_url)
+            if image_url != 'No Image' and "/re/" in image_url:
+                image_url_base = image_url.split("/re/")[0]
+            else:
+                image_url_base = image_url
+
+            description_element = art.select_one(".userHtml.userHtml-content div")
+            description = description_element.get_text(strip=True) if description_element else "No description available"
+
+            coupon_code = None
+            coupon_element = art.select_one(".voucher .buttonWithCode-code")
+            if coupon_element:
+                coupon_code = coupon_element.get_text(strip=True)
+
+            deals_data.append({
+                "title": title,
+                "url": link,
+                "temperature": temperature,
+                "hours_since_posted": total_hours,
+                "merchant": merchant,
+                "price_display": price_display,
+                "discount_percentage": discount_percentage,
+                "image_url": image_url_base,
+                "description": description,
+                "coupon_code": coupon_code,
+                "posted_or_updated": posted_or_updated
+            })
+            
+        except Exception as e:
+            logging.exception("Error procesando artículo: %s", e)
             continue
-        temp_text = temp_element.get_text(strip=True)
-        m_temp = re.search(r"(\d+(\.\d+)?)", temp_text)
-        if not m_temp:
-            continue
-        temperature = float(m_temp.group(1))
-
-        time_ribbon = art.select_one(".chip--type-default span.size--all-s")
-        if not time_ribbon:
-            continue
-        posted_text = time_ribbon.get_text(strip=True)
-        posted_or_updated = "Publicado"
-        if "Actualizado" in posted_text:
-            posted_or_updated = "Actualizado"
-
-        hours = 0
-        minutes = 0
-        days = 0
-        m_days = re.search(r"hace\s*(\d+)\s*d", posted_text)
-        if m_days:
-            days = int(m_days.group(1))
-        m_hrs = re.search(r"hace\s*(\d+)\s*h", posted_text)
-        if m_hrs:
-            hours = int(m_hrs.group(1))
-        m_min = re.search(r"hace\s*(\d+)\s*m", posted_text)
-        if m_min:
-            minutes = int(m_min.group(1))
-        total_hours = (days * 24) + hours + (minutes / 60.0)
-
-        title_element = art.select_one(".cept-tt.thread-link")
-        if not title_element:
-            continue
-        title = title_element.get_text(strip=True)
-        link = title_element["href"] if title_element.has_attr("href") else ""
-        if link.startswith("/"):
-            link = "https://www.promodescuentos.com" + link
-
-        merchant_element = art.select_one(".threadListCard-body a.link.color--text-NeutralSecondary")
-        merchant = merchant_element.get_text(strip=True) if merchant_element else "Unknown"
-
-        price_element = art.select_one(".thread-price")
-        price_display = price_element.get_text(strip=True) if price_element else None
-        if not price_display:
-            price_display = "Unknown"
-
-        discount_percentage = None
-        discount_badge = art.select_one(".textBadge--green")
-        if discount_badge:
-            discount_text = discount_badge.get_text(strip=True)
-            m_discount = re.search(r"-(\d+)%", discount_text)
-            if m_discount:
-                discount_percentage = f"{m_discount.group(1)}%"
-
-        # Extraer URL de la imagen
-        image_element = art.select_one(".threadListCard-image img.thread-image")
-        image_url = image_element['src'] if image_element and image_element.has_attr('src') else 'No Image'
-        logging.debug("Extracted image URL: %s", image_url)
-        if image_url != 'No Image' and "/re/" in image_url:
-            image_url_base = image_url.split("/re/")[0]
-        else:
-            image_url_base = image_url
-
-        description_element = art.select_one(".userHtml.userHtml-content div")
-        description = description_element.get_text(strip=True) if description_element else "No description available"
-
-        coupon_code = None
-        coupon_element = art.select_one(".voucher .buttonWithCode-code")
-        if coupon_element:
-            coupon_code = coupon_element.get_text(strip=True)
-
-        deals_data.append({
-            "title": title,
-            "url": link,
-            "temperature": temperature,
-            "hours_since_posted": total_hours,
-            "merchant": merchant,
-            "price_display": price_display,
-            "discount_percentage": discount_percentage,
-            "image_url": image_url_base,
-            "description": description,
-            "coupon_code": coupon_code,
-            "posted_or_updated": posted_or_updated
-        })
+            
+    logging.info(f"Se procesaron {len(deals_data)} ofertas válidas")
     return deals_data
 
 def filter_new_hot_deals(deals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filtra las ofertas y retorna solo aquellas que cumplan las validaciones definidas en is_deal_valid.
     """
-    return [d for d in deals if is_deal_valid(d)]
+    valid_deals = [d for d in deals if is_deal_valid(d)]
+    logging.info(f"De {len(deals)} ofertas, {len(valid_deals)} cumplen con los criterios de validación")
+    return valid_deals
 
 # ===== FUNCION PRINCIPAL =====
 
@@ -407,10 +433,6 @@ def main() -> None:
                 if not html:
                     logging.warning("No se pudieron obtener las ofertas. Se intentará nuevamente en la siguiente iteración.")
                 else:
-                    # Guardar el HTML para depuración (opcional)
-                    with open("debug_degrees.html", "w", encoding="utf-8") as f:
-                        f.write(html)
-
                     soup = BeautifulSoup(html, "html.parser")
                     deals = parse_deals(soup)
                     valid_deals = filter_new_hot_deals(deals)
