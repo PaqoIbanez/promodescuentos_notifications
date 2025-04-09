@@ -220,22 +220,38 @@ def init_driver() -> webdriver.Chrome:
     Inicializa y configura el WebDriver de Chrome.
     """
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    # Usar "headless=new" que es el modo recomendado actualmente
+    chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--remote-debugging-port=9222")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--enable-logging")
-    chrome_options.add_argument("--v=1")
-    chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 ...")
+    # Esta opción es crucial en entornos con memoria limitada como Docker/Render
+    # chrome_options.add_argument("--disable-dev-shm-usage") 
+    # chrome_options.add_argument("--disable-gpu") # Generalmente necesaria en headless
+    # chrome_options.add_argument("--window-size=1920,1080") # Puede ayudar con el layout de la página
+    # Eliminar opciones que podrían causar inestabilidad o no son necesarias:
+    # chrome_options.add_argument("--disable-extensions")
+    # chrome_options.add_argument("--disable-software-rasterizer")
+    # chrome_options.add_argument("--disable-notifications")
+    # chrome_options.add_argument("--disable-popup-blocking")
+    # chrome_options.add_argument("--remote-debugging-port=9222") # No necesario para scraping básico
+    # chrome_options.add_argument("--enable-logging") # Puede consumir recursos
+    # chrome_options.add_argument("--v=1") # Verbosity no necesaria
+    # chrome_options.add_argument("--user-data-dir=/tmp/chrome-data") # Puede consumir espacio/IO
+    # chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Ya cubierto por excludeSwitches
+    chrome_options.add_argument("user-agent=Mozilla/5.0 ...") # Quitar user-agent personalizado por ahora
+
+    # Opciones para intentar parecer menos un bot
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option("useAutomationExtension", False)
-    chrome_options.binary_location = "/usr/bin/google-chrome"
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # Especificar la ubicación binaria si es necesario (ya está en el PATH en el Dockerfile)
+    # chrome_options.binary_location = "/usr/bin/google-chrome"
+    
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    # Aumentar el timeout implícito por si la comunicación con el driver es lenta
+    driver.implicitly_wait(20) 
+    
     return driver
 
 @contextmanager
