@@ -244,7 +244,7 @@ def init_driver() -> webdriver.Chrome:
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
     # Especificar la ubicación binaria si es necesario (ya está en el PATH en el Dockerfile)
-    # chrome_options.binary_location = "/usr/bin/google-chrome"
+    chrome_options.binary_location = "/usr/bin/google-chrome"
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
