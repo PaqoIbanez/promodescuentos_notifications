@@ -18,6 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 import threading
@@ -224,19 +225,13 @@ def init_driver() -> webdriver.Chrome:
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     # Esta opción es crucial en entornos con memoria limitada como Docker/Render
-    # chrome_options.add_argument("--disable-dev-shm-usage") 
-    # chrome_options.add_argument("--disable-gpu") # Generalmente necesaria en headless
-    # chrome_options.add_argument("--window-size=1920,1080") # Puede ayudar con el layout de la página
+    chrome_options.add_argument("--disable-dev-shm-usage") 
+    chrome_options.add_argument("--disable-gpu") # Generalmente necesaria en headless
     # Eliminar opciones que podrían causar inestabilidad o no son necesarias:
-    # chrome_options.add_argument("--disable-extensions")
-    # chrome_options.add_argument("--disable-software-rasterizer")
-    # chrome_options.add_argument("--disable-notifications")
-    # chrome_options.add_argument("--disable-popup-blocking")
-    # chrome_options.add_argument("--remote-debugging-port=9222") # No necesario para scraping básico
-    # chrome_options.add_argument("--enable-logging") # Puede consumir recursos
-    # chrome_options.add_argument("--v=1") # Verbosity no necesaria
-    # chrome_options.add_argument("--user-data-dir=/tmp/chrome-data") # Puede consumir espacio/IO
-    # chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Ya cubierto por excludeSwitches
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-notifications")
+    chrome_options.add_argument("--disable-popup-blocking")
     chrome_options.add_argument("user-agent=Mozilla/5.0 ...") # Quitar user-agent personalizado por ahora
 
     # Opciones para intentar parecer menos un bot
@@ -250,20 +245,34 @@ def init_driver() -> webdriver.Chrome:
     driver = webdriver.Chrome(service=service, options=chrome_options)
     
     # Aumentar el timeout implícito por si la comunicación con el driver es lenta
+    driver.set_page_load_timeout(90) 
     driver.implicitly_wait(20) 
     
     return driver
 
+# El context manager 'get_driver' ya está bien, se asegura de llamar a quit()
 @contextmanager
 def get_driver() -> Generator[webdriver.Chrome, None, None]:
     """
     Context manager para el WebDriver que se asegura de liberar los recursos al finalizar.
     """
-    driver = init_driver()
+    driver = None # Inicializar a None
     try:
+        driver = init_driver()
         yield driver
+    except Exception as e:
+        logging.exception("Error durante la inicialización o uso del driver: %s", e)
+        # Podrías querer re-lanzar la excepción o manejarla de otra forma
+        raise # Re-lanza la excepción para que el bucle principal la vea si es necesario
     finally:
-        driver.quit()
+        if driver:
+            try:
+                logging.info("Cerrando WebDriver...")
+                driver.quit()
+                logging.info("WebDriver cerrado correctamente.")
+            except Exception as e:
+                logging.error("Error al cerrar el WebDriver: %s", e)
+                # Intentar forzar la terminación de procesos si es posible (difícil en Python puro)
 
 # ===== FUNCIONES PARA EL SCRAPING =====
 
@@ -275,25 +284,35 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
     html = ""
     try:
         logging.info(f"Accediendo a la URL: {url}")
+        # driver.get(url) # set_page_load_timeout handles this now
         driver.get(url)
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        # Incrementar un poco la espera por si el contenido tarda en cargar dinámicamente
-        time.sleep(5) 
+        # Aumentar un poco el WebDriverWait, 30 segundos es generoso
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        # Reducir la espera estática, WebDriverWait ya espera que el body exista.
+        # Si necesitas esperar contenido dinámico específico, usa otro WebDriverWait para ese elemento.
+        time.sleep(3) # Espera corta por si acaso
         html = driver.page_source
-        
-        # Guardar el HTML para depuración en el directorio /app/debug
+        # ... (resto del código de guardado)
+    # Ser más específico con las excepciones si es posible
+    except (TimeoutException, WebDriverException) as e: # Captura timeouts de Selenium y errores del driver
+        logging.error("Error scraping (Timeout/WebDriver): %s", e)
+        # Guardar HTML incluso si hay error para depuración
         debug_dir = "/app/debug"
-        # Asegurarse que el directorio existe (aunque ya se crea en Dockerfile)
-        os.makedirs(debug_dir, exist_ok=True) 
+        os.makedirs(debug_dir, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        # Construir la ruta completa al archivo de depuración
-        debug_file_path = os.path.join(debug_dir, f"debug_html_{timestamp}.html") 
-        with open(debug_file_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        logging.info(f"HTML guardado en {debug_file_path}")
-        
-    except Exception as e:
-        logging.exception("Error scraping: %s", e)
+        debug_file_path = os.path.join(debug_dir, f"debug_html_ERROR_{timestamp}.html")
+        try:
+            # Intenta obtener el source incluso en error, podría fallar
+            error_html = driver.page_source
+            with open(debug_file_path, "w", encoding="utf-8") as f:
+                f.write(error_html)
+            logging.info(f"HTML en error guardado en {debug_file_path}")
+        except Exception as save_err:
+             logging.error(f"No se pudo guardar el HTML en error: {save_err}")
+        html = "" # Asegurarse de retornar vacío
+    except Exception as e: # Captura otras excepciones inesperadas
+        logging.exception("Error inesperado durante scraping: %s", e)
+        html = ""
     return html
 
 def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
