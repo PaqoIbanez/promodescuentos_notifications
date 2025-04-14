@@ -1,0 +1,76 @@
+2025-04-14 08:58:48,945 [INFO] [MainThread] Archivo de ofertas vistas (seen_hot_deals.json) no encontrado. Empezando con diccionario vacío.
+2025-04-14 08:58:48,945 [INFO] [MainThread] Inicio del proceso de scraping. 0 ofertas cargadas desde seen_hot_deals.json.
+2025-04-14 08:58:48,946 [INFO] [MainThread] 
+===== INICIO Iteración #1 =====
+2025-04-14 08:58:48,946 [INFO] [MainThread] Revisando Promodescuentos...
+2025-04-14 08:58:48,946 [INFO] [MainThread] Inicializando WebDriver...
+2025-04-14 08:58:48,946 [INFO] [MainThread] Instalando/Actualizando ChromeDriver con webdriver-manager...
+2025-04-14 08:58:48,946 [INFO] [MainThread] ====== WebDriver manager ======
+2025-04-14 08:58:49,915 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 08:58:50,174 [INFO] [HealthCheckThread] Servidor HTTP de Health Check iniciado en 0.0.0.0:10000
+2025-04-14 08:58:50,179 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 08:58:50,319 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 08:58:50,666 [INFO] [MainThread] WebDriver version 135.0.7049.84 selected
+2025-04-14 08:58:50,670 [INFO] [MainThread] Modern chrome version https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.84/win32/chromedriver-win32.zip
+2025-04-14 08:58:50,670 [INFO] [MainThread] About to download new driver from https://storage.googleapis.com/chrome-for-testing-public/135.0.7049.84/win32/chromedriver-win32.zip
+2025-04-14 08:58:50,922 [INFO] [MainThread] Driver downloading response is 200
+2025-04-14 08:58:51,551 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 08:58:51,782 [INFO] [MainThread] Driver has been saved in cache [C:\Users\Francisco Javier\.wdm\drivers\chromedriver\win64\135.0.7049.84]
+2025-04-14 08:58:51,784 [INFO] [MainThread] ChromeDriver listo.
+2025-04-14 08:58:53,207 [INFO] [MainThread] Instancia de WebDriver creada.
+2025-04-14 08:58:53,208 [INFO] [MainThread] Timeout de carga de página establecido en 120s.
+2025-04-14 08:58:53,209 [INFO] [MainThread] Timeout implícito establecido en 10s.
+2025-04-14 08:58:53,209 [INFO] [MainThread] Accediendo a la URL: https://www.promodescuentos.com/nuevas
+2025-04-14 08:58:55,071 [INFO] [MainThread] Esperando elemento 'body' (max 30s)...
+2025-04-14 08:58:55,079 [INFO] [MainThread] Elemento 'body' cargado.
+2025-04-14 08:58:55,080 [INFO] [MainThread] Esperando contenedor de ofertas 'div#listLayout' (max 45s)...
+2025-04-14 08:59:47,182 [WARNING] [MainThread] Contenedor de ofertas 'div#listLayout' no encontrado después de 45s. La página podría estar vacía, haber cambiado o tener problemas de carga.
+2025-04-14 08:59:47,182 [INFO] [MainThread] Obteniendo page source...
+2025-04-14 08:59:47,186 [INFO] [MainThread] HTML obtenido (longitud: 18020 caracteres).
+2025-04-14 08:59:47,191 [INFO] [MainThread] HTML guardado en /app/debug\debug_html_SUCCESS_20250414_085853.html
+2025-04-14 08:59:47,191 [INFO] [MainThread] Iniciando cierre del WebDriver...
+2025-04-14 08:59:49,315 [INFO] [MainThread] WebDriver (driver.quit()) ejecutado correctamente.
+2025-04-14 08:59:51,316 [INFO] [MainThread] Pausa de 2s después de driver.quit() completada.
+2025-04-14 08:59:51,317 [INFO] [MainThread] Iniciando parseo de ofertas desde HTML...
+2025-04-14 08:59:51,318 [INFO] [MainThread] Se encontraron 0 artículos candidatos.
+2025-04-14 08:59:51,318 [INFO] [MainThread] Se parsearon 0 ofertas después de filtrar duplicados y errores internos.
+2025-04-14 08:59:51,318 [INFO] [MainThread] De 0 ofertas parseadas, 0 cumplen con los criterios de validación (temp/tiempo).
+2025-04-14 08:59:51,318 [INFO] [MainThread] No se encontraron ofertas válidas después del parseo.
+2025-04-14 08:59:51,318 [INFO] [MainThread] Iteración completada exitosamente (HTML obtenido y parseado).
+2025-04-14 08:59:51,319 [INFO] [MainThread] ===== FIN Iteración #1 =====
+2025-04-14 08:59:51,319 [INFO] [MainThread] Esperando 8 min 1 seg hasta la próxima revisión...
+2025-04-14 09:01:19,289 [INFO] [MainThread] Archivo de ofertas vistas (seen_hot_deals.json) no encontrado. Empezando con diccionario vacío.
+2025-04-14 09:01:19,289 [INFO] [MainThread] Inicio del proceso de scraping. 0 ofertas cargadas desde seen_hot_deals.json.
+2025-04-14 09:01:19,289 [INFO] [MainThread] 
+===== INICIO Iteración #1 =====
+2025-04-14 09:01:19,289 [INFO] [MainThread] Revisando Promodescuentos...
+2025-04-14 09:01:19,290 [INFO] [MainThread] Inicializando WebDriver...
+2025-04-14 09:01:19,290 [INFO] [MainThread] Instalando/Actualizando ChromeDriver con webdriver-manager...
+2025-04-14 09:01:19,290 [INFO] [MainThread] ====== WebDriver manager ======
+2025-04-14 09:01:20,005 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 09:01:20,157 [INFO] [MainThread] Get LATEST chromedriver version for google-chrome
+2025-04-14 09:01:20,299 [INFO] [MainThread] Driver [C:\Users\Francisco Javier\.wdm\drivers\chromedriver\win64\135.0.7049.84\chromedriver-win32/chromedriver.exe] found in cache
+2025-04-14 09:01:20,300 [INFO] [MainThread] ChromeDriver listo.
+2025-04-14 09:01:20,513 [INFO] [HealthCheckThread] Servidor HTTP de Health Check iniciado en 0.0.0.0:10000
+2025-04-14 09:01:21,307 [INFO] [MainThread] Instancia de WebDriver creada.
+2025-04-14 09:01:21,308 [INFO] [MainThread] Timeout de carga de página establecido en 120s.
+2025-04-14 09:01:21,308 [INFO] [MainThread] Timeout implícito establecido en 10s.
+2025-04-14 09:01:21,309 [INFO] [MainThread] Accediendo a la URL: https://www.promodescuentos.com/nuevas
+2025-04-14 09:01:24,176 [INFO] [MainThread] Esperando elemento 'body' (max 30s)...
+2025-04-14 09:01:24,184 [INFO] [MainThread] Elemento 'body' cargado.
+2025-04-14 09:01:24,184 [INFO] [MainThread] Esperando contenedor de ofertas 'div#listLayout' (max 45s)...
+2025-04-14 09:02:16,354 [WARNING] [MainThread] Contenedor de ofertas 'div#listLayout' no encontrado después de 45s. La página podría estar vacía, haber cambiado o tener problemas de carga.
+2025-04-14 09:02:16,354 [INFO] [MainThread] Obteniendo page source...
+2025-04-14 09:02:16,376 [INFO] [MainThread] HTML obtenido (longitud: 425370 caracteres).
+2025-04-14 09:02:16,378 [INFO] [MainThread] HTML guardado en /app/debug\debug_html_SUCCESS_20250414_090121.html
+2025-04-14 09:02:16,379 [INFO] [MainThread] Iniciando cierre del WebDriver...
+2025-04-14 09:02:18,519 [INFO] [MainThread] WebDriver (driver.quit()) ejecutado correctamente.
+2025-04-14 09:02:20,520 [INFO] [MainThread] Pausa de 2s después de driver.quit() completada.
+2025-04-14 09:02:20,597 [INFO] [MainThread] Iniciando parseo de ofertas desde HTML...
+2025-04-14 09:02:20,612 [INFO] [MainThread] Se encontraron 30 artículos candidatos.
+2025-04-14 09:02:20,709 [INFO] [MainThread] Se parsearon 30 ofertas después de filtrar duplicados y errores internos.
+2025-04-14 09:02:20,709 [INFO] [MainThread] De 30 ofertas parseadas, 0 cumplen con los criterios de validación (temp/tiempo).
+2025-04-14 09:02:20,710 [INFO] [MainThread] No se encontraron ofertas válidas después del parseo.
+2025-04-14 09:02:20,710 [INFO] [MainThread] Iteración completada exitosamente (HTML obtenido y parseado).
+2025-04-14 09:02:20,710 [INFO] [MainThread] ===== FIN Iteración #1 =====
+2025-04-14 09:02:20,710 [INFO] [MainThread] Esperando 7 min 41 seg hasta la próxima revisión...
