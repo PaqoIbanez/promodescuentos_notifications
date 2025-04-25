@@ -63,17 +63,45 @@ def is_deal_valid(deal: Dict[str, Any]) -> bool:
       - Temperatura ≥ 300 y publicada hace menos de 2 horas.
       - Temperatura ≥ 500 y publicada hace menos de 5 horas.
       - Temperatura ≥ 1000 y publicada hace menos de 8 horas.
+    Adicionalmente, excluye ofertas ya expiradas.
     """
+    # --- NUEVO: Excluir ofertas expiradas ---
+    # Usamos el texto original extraído por parse_deals
+    posted_text = deal.get("posted_text", "")
+    if "Expiró" in posted_text:
+        logging.debug(f"Oferta {deal.get('url', 'N/A')} ignorada por estar expirada ('{posted_text}').")
+        return False
+    # --- FIN NUEVO ---
+
     temp = deal.get("temperature", 0)
-    hours = deal.get("hours_since_posted", 0)
-    if temp >= 150 and hours < 1: # Adjusted from 0.5h
+    hours = deal.get("hours_since_posted", 999) # Default alto si falta
+
+    # Asegurarse de que temp y hours sean numéricos
+    try:
+        temp_float = float(temp)
+        hours_float = float(hours)
+    except (ValueError, TypeError):
+        logging.warning(f"Valores no numéricos en is_deal_valid para {deal.get('url', 'URL desconocida')}: temp='{temp}', hours='{hours}'. Se considera inválida.")
+        return False # No puede cumplir las condiciones numéricas
+
+    # --- Condiciones originales (ahora con temp_float y hours_float) ---
+    # Ahora las temperaturas negativas serán filtradas aquí automáticamente porque temp_float será < 150
+    if temp_float >= 150 and hours_float < 1:
+        logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 1 (Temp: {temp_float}, Horas: {hours_float})")
         return True
-    if temp >= 300 and hours < 2:
+    if temp_float >= 300 and hours_float < 2:
+        logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 2 (Temp: {temp_float}, Horas: {hours_float})")
         return True
-    if temp >= 500 and hours < 5:
+    if temp_float >= 500 and hours_float < 5:
+        logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 3 (Temp: {temp_float}, Horas: {hours_float})")
         return True
-    if temp >= 1000 and hours < 8:
+    if temp_float >= 1000 and hours_float < 8:
+        logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 4 (Temp: {temp_float}, Horas: {hours_float})")
         return True
+    # --- FIN Condiciones originales ---
+
+    # Si no cumplió ninguna condición (o era expirada)
+    logging.debug(f"Deal {deal.get('url', 'N/A')} NO validado (Temp: {temp_float}, Horas: {hours_float}, Texto Exp: '{posted_text}')")
     return False
 
 # ===== FUNCIONES DE DEBUG =====
@@ -519,15 +547,22 @@ def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
             temp_element = art.select_one(".vote-box span.vote-temp, .cept-vote-temp")
             temperature = 0.0
             if temp_element:
-                temp_text = temp_element.get_text(strip=True).replace("°", "").replace(",", "").replace("+", "")
-                m_temp = re.match(r"^\s*(\d+)\s*$", temp_text)
-                if not m_temp:
-                    m_temp = re.search(r"(\d+(\.\d+)?)", temp_text)
+                # Limpieza básica: quitar grados, comas, espacios extra. ¡NO quitar el '-' aún!
+                temp_text = temp_element.get_text(strip=True).replace("°", "").replace(",", "").strip()
+                # Regex mejorado para capturar número con signo negativo opcional
+                m_temp = re.search(r"(-?\d+(\.\d+)?)", temp_text)
                 if m_temp:
-                    try: temperature = float(m_temp.group(1))
-                    except ValueError: logging.warning(f"Valor temp no numérico: '{m_temp.group(1)}' para {link}.")
-                else: logging.warning(f"No se pudo extraer temp del texto: '{temp_text}' para {link}.")
-            else: logging.debug(f"No se encontró elem. temp para {link}.")
+                    try:
+                        # El grupo 1 ahora incluye el signo si existe
+                        temperature = float(m_temp.group(1))
+                        logging.debug(f"Temperatura extraída: {temperature} para {link}")
+                    except ValueError:
+                        logging.warning(f"Valor temp no numérico después de regex: '{m_temp.group(1)}' para {link}.")
+                else:
+                     # Puede que haya texto como 'Nuevas' si el selector falla, añadir log
+                     logging.warning(f"No se pudo extraer temp con regex del texto: '{temp_text}' para {link}.")
+            else:
+                logging.debug(f"No se encontró elem. temp (selector: .vote-box span.vote-temp, .cept-vote-temp) para {link}.")
             deal_info["temperature"] = temperature
 
             time_element = art.select_one("span.chip span.size--all-s")
