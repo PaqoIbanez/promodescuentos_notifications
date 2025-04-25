@@ -1,0 +1,19 @@
+services:
+  - type: web # Tipo de servicio (puede ser 'worker' si no necesitas exponer HTTP públicamente, pero 'web' está bien para el health check)
+    name: promodescuentos-scraper # Nombre del servicio en Render
+    env: docker # Indica que usaremos Docker
+    # dockerfilePath: ./Dockerfile # Descomentar si tu Dockerfile no está en la raíz
+    # dockerContext: .          # Descomentar si el contexto no es la raíz
+    healthCheckPath: / # Ruta para el health check (que tu servidor HTTP ya expone)
+    plan: free # O el plan que estés usando (e.g., starter) - ¡OJO! Planes gratuitos pueden ser lentos para Selenium.
+    # IMPORTANTE: Comando para iniciar tu aplicación dentro del contenedor
+    startCommand: python scrape_promodescuentos.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Marca como secreto en Render
+      - key: TELEGRAM_CHAT_ID
+        sync: false # Marca como secreto en Render
+      - key: PYTHONUNBUFFERED # Recomendado para logs en Docker
+        value: "1"
+      - key: PYTHONIOENCODING # Asegura UTF-8 para logs
+        value: "UTF-8"

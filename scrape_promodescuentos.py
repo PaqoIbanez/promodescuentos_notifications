@@ -380,24 +380,24 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
         driver.get(url) # Page load timeout set during init
 
         # Wait for body first (quick check)
-        logging.info("Esperando elemento 'body' (max 30s)...")
-        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        logging.info("Esperando elemento 'body' (max 30s)...") # Podrías incluso aumentar este timeout a 60s si es necesario
+        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         logging.info("Elemento 'body' cargado.")
 
         # Wait specifically for the container holding the deals
         # Inspect the page to find a suitable container ID or class
-        deals_container_selector = "div#listLayout" # Example selector, adjust if needed
-        try:
-            logging.info(f"Esperando contenedor de ofertas '{deals_container_selector}' (max 45s)...")
-            WebDriverWait(driver, 45).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, deals_container_selector))
-            )
-            logging.info("Contenedor de ofertas encontrado.")
-            # Optional: Add a small static wait AFTER the container is found, just in case
-            # time.sleep(2)
-        except TimeoutException:
-            logging.warning(f"Contenedor de ofertas '{deals_container_selector}' no encontrado después de 45s. La página podría estar vacía, haber cambiado o tener problemas de carga.")
-            # Continue anyway, maybe parsing can still find something or it's just empty
+        # deals_container_selector = "div#listLayout" # Example selector, adjust if needed
+        # try:
+        #     logging.info(f"Esperando contenedor de ofertas '{deals_container_selector}' (max 45s)...")
+        #     WebDriverWait(driver, 45).until(
+        #         EC.presence_of_element_located((By.CSS_SELECTOR, deals_container_selector))
+        #     )
+        #     logging.info("Contenedor de ofertas encontrado.")
+        #     # Optional: Add a small static wait AFTER the container is found, just in case
+        #     # time.sleep(2)
+        # except TimeoutException:
+        #     logging.warning(f"Contenedor de ofertas '{deals_container_selector}' no encontrado después de 45s. La página podría estar vacía, haber cambiado o tener problemas de carga.")
+        #     # Continue anyway, maybe parsing can still find something or it's just empty
 
         logging.info("Obteniendo page source...")
         html_content = driver.page_source
@@ -656,11 +656,16 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
     def _send_error(self, status_code, message):
         body = message.encode('utf-8')
-        # Check if headers already sent to avoid "Cannot send headers after they are sent to the client"
-        if not self.headers_sent:
-            self._send_response_util(status_code, 'text/plain; charset=utf-8', body)
-        else:
-            logging.error(f"Intento de enviar error '{message}' después de que las cabeceras ya fueron enviadas.")
+        try:
+            # Call send_response FIRST - this initializes headers_sent
+            self.send_response(status_code)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            # Log if sending the error itself fails
+            logging.error(f"Error sending HTTP error response ({status_code} - {message}): {e}")
 
 
     def _serve_debug_index(self):
