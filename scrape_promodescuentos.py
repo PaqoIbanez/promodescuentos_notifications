@@ -6,7 +6,7 @@ import os
 import json
 import logging
 from contextlib import contextmanager
-from typing import Dict, List, Any, Generator
+from typing import Dict, List, Any, Generator, Set
 import signal # Import signal for graceful shutdown attempts
 import glob # Para buscar archivos con patrones
 import sys # Para salir limpiamente
@@ -25,7 +25,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler, SimpleHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import mimetypes
 
 # ===== CONFIGURACIÓN =====
@@ -44,11 +44,16 @@ logging.basicConfig(
 )
 
 # ==== CONFIGURACIONES TELEGRAM ====
+# El TELEGRAM_CHAT_ID global puede usarse para admin o si el bot solo tiene un usuario principal
+# Sin embargo, para múltiples usuarios, el chat_id vendrá del mensaje o de una lista de suscriptores.
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "") # Puede ser usado por admin o como fallback si es necesario
+APP_BASE_URL: str = os.getenv("APP_BASE_URL", "") # Ej: https://tu-app.onrender.com
 
 # Archivo para guardar ofertas ya vistas
 SEEN_FILE: str = "seen_hot_deals.json"
+# Archivo para guardar suscriptores
+SUBSCRIBERS_FILE: str = "subscribers.json"
 
 # ==== CONFIGURACIONES DE DEBUG ==== (Constantes globales)
 DEBUG_DIR = "/app/debug"
@@ -208,6 +213,53 @@ def save_seen_deals(filepath: str, seen_deals: Dict[str, int]) -> None:
             except OSError as remove_err:
                 logging.error(f"Error eliminando archivo temporal {temp_filepath}: {remove_err}")
 
+def load_subscribers_global(filepath: str) -> None:
+    """
+    Carga los chat_id de los suscriptores desde un archivo JSON al set global 'subscribers'.
+    """
+    global subscribers
+    if not os.path.isfile(filepath):
+        logging.info(f"Archivo de suscriptores ({filepath}) no encontrado. Empezando con set vacío.")
+        subscribers = set()
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                logging.warning(f"El contenido de {filepath} no es una lista JSON válida. Empezando con set vacío.")
+                subscribers = set()
+                return
+            with subscribers_lock:
+                subscribers = {str(chat_id) for chat_id in data if chat_id}
+            logging.info(f"Cargados {len(subscribers)} suscriptores desde {filepath} al set global.")
+    except json.JSONDecodeError:
+        logging.error(f"Error decodificando JSON desde {filepath}. El archivo podría estar corrupto. Empezando con set vacío.")
+        subscribers = set()
+    except Exception as e:
+        logging.exception(f"Error inesperado cargando los suscriptores: {e}")
+        subscribers = set()
+
+def save_subscribers_global(filepath: str) -> None:
+    """
+    Guarda los chat_id del set global 'subscribers' en un archivo JSON de forma segura.
+    """
+    global subscribers
+    temp_filepath = filepath + ".tmp"
+    try:
+        with subscribers_lock:
+            subscribers_list = sorted(list(subscribers))
+        with open(temp_filepath, "w", encoding="utf-8") as f:
+            json.dump(subscribers_list, f, indent=4)
+        os.replace(temp_filepath, filepath)
+        logging.info(f"Suscriptores ({len(subscribers_list)}) guardados correctamente en {filepath} desde el set global.")
+    except Exception as e:
+        logging.error(f"Error guardando los suscriptores en {filepath}: {e}")
+        if os.path.exists(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except OSError as remove_err:
+                logging.error(f"Error eliminando archivo temporal {temp_filepath} de suscriptores: {remove_err}")
+
 # ===== FUNCIONES DE RATING =====
 
 def get_deal_rating(deal: Dict[str, Any]) -> int:
@@ -239,45 +291,63 @@ def get_deal_rating(deal: Dict[str, Any]) -> int:
 
 # ===== FUNCIONES PARA TELEGRAM =====
 
-def send_telegram_message(deal_data: Dict[str, Any]) -> None:
+def send_telegram_message(deal_data: Dict[str, Any], target_chat_id: str, message_text_override: str = None) -> None:
     """
-    Envía un mensaje a Telegram con formato mejorado y manejo de errores.
+    Envía un mensaje a Telegram. Puede ser un mensaje de oferta (deal_data)
+    o un mensaje de texto simple (message_text_override).
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.warning("Telegram API no configurado, mensaje no enviado.")
+    if not TELEGRAM_BOT_TOKEN:
+        logging.warning("TELEGRAM_BOT_TOKEN no configurado, mensaje no enviado.")
+        return
+    if not target_chat_id:
+        logging.warning("target_chat_id vacío, mensaje no enviado.")
         return
 
     try:
-        rating = get_deal_rating(deal_data)
-        emoji = "🔥" * rating
+        payload: Dict[str, Any] = {
+            "chat_id": target_chat_id,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True, # Por defecto para mensajes de oferta
+        }
+        url_api_path = "/sendMessage" # Por defecto
 
-        hours_posted: float = deal_data.get('hours_since_posted', 0)
-        if not isinstance(hours_posted, (int, float)) or hours_posted < 0:
-             hours_posted = 0
+        if message_text_override:
+            payload["text"] = message_text_override
+            # Para mensajes de texto simples, no necesitamos reply_markup ni web page preview usualmente.
+            payload.pop("disable_web_page_preview", None)
+            payload.pop("reply_markup", None)
+        
+        elif deal_data:
+            rating = get_deal_rating(deal_data)
+            emoji = "🔥" * rating
 
-        if hours_posted >= 1:
-            time_ago_text = f"{int(hours_posted)} horas" if hours_posted >= 1.5 else "1 hora"
-        else:
-            minutes_ago = int(hours_posted * 60)
-            time_ago_text = f"{minutes_ago} minutos" if minutes_ago > 1 else "1 minuto"
+            hours_posted: float = deal_data.get('hours_since_posted', 0)
+            if not isinstance(hours_posted, (int, float)) or hours_posted < 0:
+                 hours_posted = 0
 
-        price_display: str = str(deal_data.get('price_display', "N/D"))
-        price_text: str = f"<b>Precio:</b> {price_display}" if price_display != "N/D" else ""
-        discount_percentage: str = str(deal_data.get('discount_percentage', ""))
-        discount_text: str = f"<b>Descuento:</b> {discount_percentage}" if discount_percentage else ""
-        coupon_code: str = str(deal_data.get('coupon_code', ""))
-        coupon_code_safe = coupon_code.replace('<', '<').replace('>', '>').replace('&', '&')
-        coupon_text: str = f"<b>Cupón:</b> <code>{coupon_code_safe}</code>" if coupon_code else ""
+            if hours_posted >= 1:
+                time_ago_text = f"{int(hours_posted)} horas" if hours_posted >= 1.5 else "1 hora"
+            else:
+                minutes_ago = int(hours_posted * 60)
+                time_ago_text = f"{minutes_ago} minutos" if minutes_ago > 1 else "1 minuto"
 
-        opt_price = "\n" + price_text if price_text else ""
-        opt_discount = "\n" + discount_text if discount_text else ""
-        opt_coupon = "\n" + coupon_text if coupon_text else ""
+            price_display: str = str(deal_data.get('price_display', "N/D"))
+            price_text: str = f"<b>Precio:</b> {price_display}" if price_display != "N/D" else ""
+            discount_percentage: str = str(deal_data.get('discount_percentage', ""))
+            discount_text: str = f"<b>Descuento:</b> {discount_percentage}" if discount_percentage else ""
+            coupon_code: str = str(deal_data.get('coupon_code', ""))
+            coupon_code_safe = coupon_code.replace('<', '<').replace('>', '>').replace('&', '&')
+            coupon_text: str = f"<b>Cupón:</b> <code>{coupon_code_safe}</code>" if coupon_code else ""
 
-        title_safe = str(deal_data.get('title', '')).replace('<', '<').replace('>', '>').replace('&', '&')
-        description_safe = str(deal_data.get('description', '')).replace('<', '<').replace('>', '>').replace('&', '&')
-        merchant_safe = str(deal_data.get('merchant', 'N/D')).replace('<', '<').replace('>', '>').replace('&', '&')
+            opt_price = "\n" + price_text if price_text else ""
+            opt_discount = "\n" + discount_text if discount_text else ""
+            opt_coupon = "\n" + coupon_text if coupon_text else ""
 
-        message = f"""
+            title_safe = str(deal_data.get('title', '')).replace('<', '<').replace('>', '>').replace('&', '&')
+            description_safe = str(deal_data.get('description', '')).replace('<', '<').replace('>', '>').replace('&', '&')
+            merchant_safe = str(deal_data.get('merchant', 'N/D')).replace('<', '<').replace('>', '>').replace('&', '&')
+
+            message_content = f"""
 <b>{title_safe}</b>
 
 <b>Calificación:</b> {deal_data.get('temperature', 0):.0f}° {emoji}
@@ -287,55 +357,55 @@ def send_telegram_message(deal_data: Dict[str, Any]) -> None:
 
 <b>Descripción:</b>
 {description_safe}
-        """.strip()
+            """.strip()
 
-        deal_url = deal_data.get('url', '')
-        if not deal_url:
-            logging.error(f"No URL found for deal '{title_safe}', cannot send Telegram message.")
+            deal_url = deal_data.get('url', '')
+            if not deal_url:
+                logging.error(f"No URL found for deal '{title_safe}', cannot send Telegram message.")
+                return
+
+            reply_markup_data = {
+                "inline_keyboard": [[{"text": "Ver Oferta", "url": deal_url}]]
+            }
+            payload["reply_markup"] = json.dumps(reply_markup_data)
+
+            image_url: str = deal_data.get('image_url', '')
+            use_photo = False
+            if image_url and isinstance(image_url, str) and image_url != 'No Image' and image_url.startswith(('http://', 'https://')):
+                use_photo = True
+                url_api_path = "/sendPhoto"
+                payload["photo"] = image_url
+                payload["caption"] = message_content
+                if len(message_content) > 1024:
+                     payload["caption"] = message_content[:1020] + "..."
+                     logging.warning(f"Caption truncated for photo message (URL: {deal_url})")
+            else:
+                payload["text"] = message_content
+                if len(message_content) > 4096:
+                    payload["text"] = message_content[:4092] + "..."
+                    logging.warning(f"Text message truncated (URL: {deal_url})")
+                if image_url and image_url != 'No Image':
+                    logging.warning(f"Invalid or missing image URL: '{image_url}'. Sending text message.")
+        else:
+            logging.warning("send_telegram_message llamado sin deal_data ni message_text_override.")
             return
 
-        reply_markup = {
-            "inline_keyboard": [[{"text": "Ver Oferta", "url": deal_url}]]
-        }
-
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "parse_mode": "HTML",
-            "reply_markup": json.dumps(reply_markup),
-            "disable_web_page_preview": True,
-        }
-
-        image_url: str = deal_data.get('image_url', '')
-        use_photo = False
-        if image_url and isinstance(image_url, str) and image_url != 'No Image' and image_url.startswith(('http://', 'https://')):
-            use_photo = True
-            url_api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            payload["photo"] = image_url
-            payload["caption"] = message
-            if len(message) > 1024:
-                 payload["caption"] = message[:1020] + "..."
-                 logging.warning(f"Caption truncated for photo message (URL: {deal_url})")
-        else:
-            url_api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload["text"] = message
-            if len(message) > 4096:
-                payload["text"] = message[:4092] + "..."
-                logging.warning(f"Text message truncated (URL: {deal_url})")
-            if image_url and image_url != 'No Image':
-                logging.warning(f"Invalid or missing image URL: '{image_url}'. Sending text message.")
-
-        logging.debug(f"Sending Telegram {'photo' if use_photo else 'message'}. Payload keys: {list(payload.keys())}")
+        url_api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}{url_api_path}"
+        
+        logging.debug(f"Sending Telegram {('photo' if url_api_path == '/sendPhoto' and deal_data else 'message')}. Target: {target_chat_id}. Payload keys: {list(payload.keys())}")
         resp = requests.post(url_api, json=payload, timeout=20)
         resp.raise_for_status()
-        logging.info(f"Mensaje Telegram enviado correctamente para: {deal_url}")
-        time.sleep(1)
+        logging.info(f"Mensaje Telegram enviado correctamente a: {target_chat_id} para {'oferta ' + deal_data.get('url', 'N/A') if deal_data else 'mensaje de texto'}")
+        time.sleep(1) # Mantener un pequeño delay
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error en API de Telegram para {deal_data.get('url', 'N/A')}: {e}")
+        deal_url_log = deal_data.get('url', 'N/A') if deal_data else "N/A (mensaje de texto)"
+        logging.error(f"Error en API de Telegram para {deal_url_log} (target: {target_chat_id}): {e}")
         if hasattr(e, 'response') and e.response is not None:
             logging.error(f"Respuesta API Telegram: Status={e.response.status_code}, Body={e.response.text}")
     except Exception as e:
-        logging.exception(f"Excepción inesperada enviando mensaje Telegram para {deal_data.get('url', 'N/A')}: {e}")
+        deal_url_log = deal_data.get('url', 'N/A') if deal_data else "N/A (mensaje de texto)"
+        logging.exception(f"Excepción inesperada enviando mensaje Telegram a {target_chat_id} para {deal_url_log}: {e}")
 
 # ===== FUNCIONES PARA EL DRIVER =====
 
@@ -693,10 +763,12 @@ def filter_new_hot_deals(deals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return valid_deals
 
 
-# ===== HTTP SERVER & HEALTH CHECK =====
+# ===== HTTP SERVER & HEALTH CHECK & WEBHOOK =====
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Handler para el health check y para servir archivos de depuración."""
+class RequestHandler(BaseHTTPRequestHandler): # Renombrado de HealthCheckHandler
+    """
+    Handler para el health check, servir archivos de depuración y procesar webhooks de Telegram.
+    """
     # Usa la constante global DEBUG_DIR
     # DEBUG_DIR = "/app/debug" # Ya no es necesario definirla aquí
 
@@ -707,8 +779,98 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self._serve_debug_index()
         elif self.path.startswith('/debug/'):
             self._serve_debug_file()
+        # Podrías añadir un endpoint GET para /webhook/<TOKEN> para verificar que está configurado,
+        # pero Telegram usa POST para enviar actualizaciones.
         else:
             self._send_error(404, "Ruta no encontrada")
+
+    def do_POST(self):
+        # El path del webhook debe ser secreto, idealmente incluyendo el token del bot
+        webhook_path = f"/webhook/{TELEGRAM_BOT_TOKEN}" 
+        if self.path == webhook_path:
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length == 0:
+                    logging.warning("Webhook recibió POST vacío.")
+                    self._send_error(400, "POST vacío")
+                    return
+
+                post_data = self.rfile.read(content_length)
+                logging.info(f"Webhook recibió datos: {post_data.decode('utf-8')[:200]}...") # Loguear solo una parte
+                
+                update = json.loads(post_data.decode('utf-8'))
+                
+                self._process_telegram_update(update)
+                
+                # Responder a Telegram que todo OK
+                self._send_json_response({"status": "ok"}, status=200)
+
+            except json.JSONDecodeError:
+                logging.error("Error decodificando JSON del webhook de Telegram.")
+                self._send_error(400, "JSON inválido")
+            except Exception as e:
+                logging.exception("Error procesando webhook de Telegram.")
+                self._send_error(500, "Error interno del servidor procesando webhook")
+        else:
+            self._send_error(404, "Ruta POST no encontrada o token inválido en URL.")
+
+    def _process_telegram_update(self, update: Dict[str, Any]):
+        global subscribers # Necesario para modificar el set global
+        
+        if 'message' in update:
+            message = update['message']
+            chat_id = str(message['chat']['id'])
+            text = message.get('text', '')
+
+            logging.info(f"Mensaje recibido de chat_id {chat_id}: '{text}'")
+
+            if text.lower() == '/start' or text.lower() == '/subscribe':
+                added = False
+                with subscribers_lock:
+                    if chat_id not in subscribers:
+                        subscribers.add(chat_id)
+                        added = True
+                
+                if added:
+                    save_subscribers_global(SUBSCRIBERS_FILE) # Guardar la lista actualizada
+                    welcome_message = "¡Hola! 🎉 Te has suscrito a las notificaciones de ofertas de Promodescuentos. Te avisaré cuando encuentre nuevas ofertas calientes."
+                    send_telegram_message(deal_data=None, target_chat_id=chat_id, message_text_override=welcome_message)
+                    logging.info(f"Chat ID {chat_id} añadido a suscriptores.")
+                else:
+                    already_subscribed_message = "Ya estás suscrito. ¡Gracias por tu interés! 👍"
+                    send_telegram_message(deal_data=None, target_chat_id=chat_id, message_text_override=already_subscribed_message)
+                    logging.info(f"Chat ID {chat_id} ya estaba suscrito.")
+            
+            elif text.lower() == '/stop' or text.lower() == '/unsubscribe':
+                removed = False
+                with subscribers_lock:
+                    if chat_id in subscribers:
+                        subscribers.discard(chat_id)
+                        removed = True
+                
+                if removed:
+                    save_subscribers_global(SUBSCRIBERS_FILE)
+                    goodbye_message = "Has cancelado tu suscripción. Ya no recibirás notificaciones de ofertas. Puedes volver a suscribirte con /start."
+                    send_telegram_message(deal_data=None, target_chat_id=chat_id, message_text_override=goodbye_message)
+                    logging.info(f"Chat ID {chat_id} eliminado de suscriptores.")
+                else:
+                    not_subscribed_message = "No estabas suscrito. Usa /start para recibir notificaciones."
+                    send_telegram_message(deal_data=None, target_chat_id=chat_id, message_text_override=not_subscribed_message)
+                    logging.info(f"Chat ID {chat_id} intentó desuscribirse pero no estaba en la lista.")
+
+            else:
+                # Respuesta por defecto para otros mensajes
+                help_message = "Soy un bot que te notifica sobre ofertas de Promodescuentos. Usa /start para suscribirte o /stop para cancelar la suscripción."
+                send_telegram_message(deal_data=None, target_chat_id=chat_id, message_text_override=help_message)
+        
+        elif 'callback_query' in update:
+            # Manejar callback queries si añades botones inline en el futuro
+            # Por ahora, solo logueamos.
+            callback_query = update['callback_query']
+            chat_id = str(callback_query['message']['chat']['id'])
+            data = callback_query.get('data')
+            logging.info(f"Callback query recibido de chat_id {chat_id} con data: {data}")
+            # Podrías enviar una respuesta al callback query aquí con answerCallbackQuery
 
     def _send_response_util(self, status_code, content_type, body):
         self.send_response(status_code)
@@ -820,29 +982,32 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         try:
             status_code = str(args[1])
-            if status_code.startswith(('2', '3')):
-                return
+            if status_code.startswith(('2', '3')): # No loguear 2xx y 3xx
+                # También podemos evitar loguear el POST del webhook si es muy verboso
+                # path = args[0].split()[1] if len(args[0].split()) > 1 else ""
+                # if path == f"/webhook/{TELEGRAM_BOT_TOKEN}" and args[0].startswith("POST"):
+                #    return
+                return 
         except IndexError:
             pass
-        super().log_message(format, *args)
+        logging.info(f"HTTP Request: {args[0]}") # Loguear otras peticiones
 
-def run_health_server():
-    server_address = ('0.0.0.0', 10000)
+def run_server(): # Renombrado de run_health_server
+    server_address = ('0.0.0.0', int(os.getenv("PORT", 10000))) # Usar PORT de Render si está disponible
     httpd = None
     try:
-        httpd = HTTPServer(server_address, HealthCheckHandler)
-        logging.info(f"Servidor HTTP de Health Check iniciado en {server_address[0]}:{server_address[1]}")
+        httpd = HTTPServer(server_address, RequestHandler) # Usar el handler renombrado
+        logging.info(f"Servidor HTTP iniciado en {server_address[0]}:{server_address[1]} (para health checks y webhook)")
         httpd.serve_forever()
     except OSError as e:
          logging.error(f"No se pudo iniciar el servidor HTTP en {server_address} (quizás el puerto ya está en uso?): {e}")
-         os._exit(2) # Salida crítica si el servidor no puede arrancar
+         os._exit(2) 
     except Exception as e:
         logging.exception(f"Error fatal en el servidor HTTP: {e}")
     finally:
         if httpd:
             httpd.server_close()
             logging.info("Servidor HTTP cerrado.")
-
 
 # ===== FUNCION PRINCIPAL =====
 
@@ -856,16 +1021,42 @@ def signal_handler(signum, frame):
 
 def main() -> None:
     """
-    Función principal que ejecuta el scraper en un loop, con manejo de errores,
-    limpieza de debug y reinicio programado.
+    Función principal que ejecuta el scraper en un loop y gestiona el bot.
     """
-    # Registrar manejadores de señal
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Iniciar servidor de health check
-    health_thread = threading.Thread(target=run_health_server, name="HealthCheckThread", daemon=True)
-    health_thread.start()
+    # Cargar suscriptores al inicio
+    load_subscribers_global(SUBSCRIBERS_FILE)
+    logging.info(f"Suscriptores iniciales cargados: {len(subscribers)}")
+
+    # Configurar Webhook si APP_BASE_URL y TELEGRAM_BOT_TOKEN están definidos
+    if APP_BASE_URL and TELEGRAM_BOT_TOKEN:
+        webhook_url = f"{APP_BASE_URL.rstrip('/')}/webhook/{TELEGRAM_BOT_TOKEN}"
+        try:
+            set_webhook_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+            params = {"url": webhook_url}
+            # Puedes añadir allowed_updates aquí si solo quieres ciertos tipos de updates, ej: ["message", "callback_query"]
+            # params["allowed_updates"] = json.dumps(["message"]) 
+            response = requests.post(set_webhook_url, params=params, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            if result.get("ok"):
+                logging.info(f"Webhook configurado exitosamente en: {webhook_url}. Resultado: {result.get('description')}")
+            else:
+                logging.error(f"Fallo al configurar webhook en {webhook_url}. Respuesta: {result}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error de red configurando webhook {webhook_url}: {e}")
+        except json.JSONDecodeError:
+            logging.error(f"Error decodificando respuesta de setWebhook: {response.text}")
+        except Exception as e:
+            logging.exception(f"Excepción inesperada configurando webhook {webhook_url}: {e}")
+    else:
+        logging.warning("APP_BASE_URL o TELEGRAM_BOT_TOKEN no definidos. El webhook no será configurado. El bot no recibirá mensajes de usuarios.")
+
+    # Iniciar servidor HTTP (Health Check y Webhook)
+    server_thread = threading.Thread(target=run_server, name="HTTPServerThread", daemon=True) # Renombrado
+    server_thread.start()
 
     # --- Limpieza inicial de archivos de debug ---
     logging.info("Realizando limpieza inicial de archivos de debug antiguos...")
@@ -874,7 +1065,7 @@ def main() -> None:
     # --- Fin limpieza inicial ---
 
     seen_deals: Dict[str, int] = load_seen_deals(SEEN_FILE)
-    logging.info(f"Inicio del proceso de scraping. {len(seen_deals)} ofertas cargadas desde {SEEN_FILE}.")
+    logging.info(f"Inicio del proceso de scraping. {len(seen_deals)} ofertas cargadas desde {SEEN_FILE}. {len(subscribers)} suscriptores cargados.")
 
     iteration_count = 0
     consecutive_failures = 0
@@ -922,7 +1113,25 @@ def main() -> None:
                         if url not in seen_deals or current_rating > previous_rating:
                             log_prefix = "[NUEVA]" if url not in seen_deals else f"[MEJORA RATING ({previous_rating}->{current_rating})]"
                             logging.info(f"{log_prefix} {deal.get('temperature'):.0f}°|{deal.get('hours_since_posted'):.1f}h| {deal.get('title')} | {url}")
-                            send_telegram_message(deal)
+                            
+                            current_subscribers_copy = set() # Copiar para iterar de forma segura
+                            with subscribers_lock:
+                                current_subscribers_copy = subscribers.copy()
+
+                            if not current_subscribers_copy:
+                                logging.info("No hay suscriptores a los que notificar.")
+                                # Considera si el admin (TELEGRAM_CHAT_ID) debe recibir notificaciones siempre,
+                                # incluso si no está en 'subscribers'. Por ahora, solo notificamos a 'subscribers'.
+                                # if TELEGRAM_CHAT_ID: 
+                                #    send_telegram_message(deal, TELEGRAM_CHAT_ID)
+                            else:
+                                logging.info(f"Enviando oferta a {len(current_subscribers_copy)} suscriptor(es).")
+                                for chat_id_subscriber in current_subscribers_copy:
+                                    try:
+                                        send_telegram_message(deal, chat_id_subscriber)
+                                    except Exception as e_send:
+                                        logging.error(f"Error enviando mensaje a suscriptor {chat_id_subscriber}: {e_send}")
+                            
                             current_seen_in_iteration[url] = current_rating
                             new_deals_found_count += 1
 
