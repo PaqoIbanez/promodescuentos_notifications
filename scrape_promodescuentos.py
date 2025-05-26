@@ -28,6 +28,11 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import mimetypes
 
+# Global set de suscriptores y lock para acceso concurrente
+# Definido aquí para asegurar que existe antes de cualquier función o configuración que pueda usarlo.
+subscribers: Set[str] = set()
+subscribers_lock = threading.Lock()
+
 # ===== CONFIGURACIÓN =====
 
 # Cargar variables de entorno desde un archivo .env
@@ -816,6 +821,7 @@ class RequestHandler(BaseHTTPRequestHandler): # Renombrado de HealthCheckHandler
 
     def _process_telegram_update(self, update: Dict[str, Any]):
         global subscribers # Necesario para modificar el set global
+        global subscribers_lock # Asegurar que estamos usando el lock global
         
         if 'message' in update:
             message = update['message']
@@ -1115,6 +1121,7 @@ def main() -> None:
                             logging.info(f"{log_prefix} {deal.get('temperature'):.0f}°|{deal.get('hours_since_posted'):.1f}h| {deal.get('title')} | {url}")
                             
                             current_subscribers_copy = set() # Copiar para iterar de forma segura
+                            global subscribers_lock # Asegurar que estamos usando el lock global
                             with subscribers_lock:
                                 current_subscribers_copy = subscribers.copy()
 
