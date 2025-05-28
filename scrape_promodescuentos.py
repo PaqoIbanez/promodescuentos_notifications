@@ -52,8 +52,15 @@ logging.basicConfig(
 # El TELEGRAM_CHAT_ID global puede usarse para admin o si el bot solo tiene un usuario principal
 # Sin embargo, para múltiples usuarios, el chat_id vendrá del mensaje o de una lista de suscriptores.
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "") # Puede ser usado por admin o como fallback si es necesario
+# TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "") # Para admin o notificaciones especiales, puede ser redundante con ADMIN_CHAT_IDS
 APP_BASE_URL: str = os.getenv("APP_BASE_URL", "") # Ej: https://tu-app.onrender.com
+
+ADMIN_CHAT_IDS_STR: str = os.getenv("ADMIN_CHAT_IDS", "") # Lista de CHAT_IDs separados por coma
+logging.info(f"Raw ADMIN_CHAT_IDS_STR from env: '{ADMIN_CHAT_IDS_STR}'") # DEBUG LINE
+ADMIN_CHAT_IDS: Set[str] = set()
+if ADMIN_CHAT_IDS_STR:
+    ADMIN_CHAT_IDS = {chat_id.strip() for chat_id in ADMIN_CHAT_IDS_STR.split(',') if chat_id.strip()}
+    logging.info(f"CHAT_IDs administrativos cargados para notificación siempre: {ADMIN_CHAT_IDS}")
 
 # Archivo para guardar ofertas ya vistas
 SEEN_FILE: str = "seen_hot_deals.json"
@@ -1120,24 +1127,23 @@ def main() -> None:
                             log_prefix = "[NUEVA]" if url not in seen_deals else f"[MEJORA RATING ({previous_rating}->{current_rating})]"
                             logging.info(f"{log_prefix} {deal.get('temperature'):.0f}°|{deal.get('hours_since_posted'):.1f}h| {deal.get('title')} | {url}")
                             
-                            current_subscribers_copy = set() # Copiar para iterar de forma segura
+                            # Combinar suscriptores y admins, evitando duplicados
+                            recipients_to_notify = set()
                             global subscribers_lock # Asegurar que estamos usando el lock global
                             with subscribers_lock:
-                                current_subscribers_copy = subscribers.copy()
+                                recipients_to_notify.update(subscribers) # Añadir suscriptores
+                            
+                            recipients_to_notify.update(ADMIN_CHAT_IDS) # Añadir IDs de administrador (ya es un set)
 
-                            if not current_subscribers_copy:
-                                logging.info("No hay suscriptores a los que notificar.")
-                                # Considera si el admin (TELEGRAM_CHAT_ID) debe recibir notificaciones siempre,
-                                # incluso si no está en 'subscribers'. Por ahora, solo notificamos a 'subscribers'.
-                                # if TELEGRAM_CHAT_ID: 
-                                #    send_telegram_message(deal, TELEGRAM_CHAT_ID)
+                            if not recipients_to_notify:
+                                logging.info("No hay destinatarios (ni suscriptores ni admin IDs) a los que notificar.")
                             else:
-                                logging.info(f"Enviando oferta a {len(current_subscribers_copy)} suscriptor(es).")
-                                for chat_id_subscriber in current_subscribers_copy:
+                                logging.info(f"Enviando oferta a {len(recipients_to_notify)} destinatario(s) (suscritos + admin).")
+                                for chat_id_recipient in recipients_to_notify:
                                     try:
-                                        send_telegram_message(deal, chat_id_subscriber)
+                                        send_telegram_message(deal, chat_id_recipient)
                                     except Exception as e_send:
-                                        logging.error(f"Error enviando mensaje a suscriptor {chat_id_subscriber}: {e_send}")
+                                        logging.error(f"Error enviando mensaje a destinatario {chat_id_recipient}: {e_send}")
                             
                             current_seen_in_iteration[url] = current_rating
                             new_deals_found_count += 1
