@@ -1,21 +1,13 @@
 FROM python:3.11-slim
 
-# Instalar dependencias del sistema
+# Install minimal system dependencies (if any are needed for requests/bs4, usually none for slim)
+# requests and bs4 on python-slim usually work out of the box or might need gcc for some wheels, but pure python usually fine.
+# We'll keep apt-get update just in case we need to add something later, but remove the heavy stuff.
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
-    xvfb \
-    libxi6 \
-    libgconf-2-4 \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/*
+# Chrome installation removed
 
 # Configurar el directorio de trabajo
 WORKDIR /app

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+debug/
+logs/
+.DS_Store
+venv/
+app.log
+debug_parsing.py
+experiment_requests.py
+seen_hot_deals.json

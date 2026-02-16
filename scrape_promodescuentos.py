@@ -15,14 +15,7 @@ import requests
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
+
 
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -68,7 +61,7 @@ SEEN_FILE: str = "seen_hot_deals.json"
 SUBSCRIBERS_FILE: str = "subscribers.json"
 
 # ==== CONFIGURACIONES DE DEBUG ==== (Constantes globales)
-DEBUG_DIR = "/app/debug"
+DEBUG_DIR = os.getenv("DEBUG_DIR", "debug")
 DEBUG_FILE_PREFIX = "debug_html_"
 KEEP_DEBUG_FILES = 5 # Número de archivos de debug a conservar
 
@@ -103,7 +96,7 @@ def is_deal_valid(deal: Dict[str, Any]) -> bool:
 
     # --- Condiciones originales (ahora con temp_float y hours_float) ---
     # Ahora las temperaturas negativas serán filtradas aquí automáticamente porque temp_float será < 150
-    if temp_float >= 150 and hours_float < 1:
+    if temp_float >= 10 and hours_float < 1:
         logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 1 (Temp: {temp_float}, Horas: {hours_float})")
         return True
     if temp_float >= 300 and hours_float < 2:
@@ -421,135 +414,52 @@ def send_telegram_message(deal_data: Dict[str, Any], target_chat_id: str, messag
 
 # ===== FUNCIONES PARA EL DRIVER =====
 
-def init_driver() -> webdriver.Chrome:
-    """
-    Inicializa y configura el WebDriver de Chrome con optimizaciones para Docker/Render.
-    """
-    logging.info("Inicializando WebDriver...")
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-popup-blocking")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--disable-translate")
-    chrome_options.add_argument("--disable-background-timer-throttling")
-    chrome_options.add_argument("--disable-component-update")
-    chrome_options.add_argument("--disable-domain-reliability")
-    chrome_options.add_argument("--disable-features=AudioServiceOutOfProcess")
-    chrome_options.add_argument("--disable-ipc-flooding-protection")
-    chrome_options.add_argument("--disable-notifications")
-    chrome_options.add_argument("--disable-renderer-backgrounding")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--metrics-recording-only")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 ...")
-    chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--safebrowsing-disable-auto-update")
-    chrome_options.add_argument("--password-store=basic")
-    chrome_options.add_argument("--use-mock-keychain")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-    chrome_options.binary_location = "/usr/bin/google-chrome"
-
-    try:
-        logging.info("Instalando/Actualizando ChromeDriver con webdriver-manager...")
-        service = Service(ChromeDriverManager().install())
-        logging.info("ChromeDriver listo.")
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        logging.info("Instancia de WebDriver creada.")
-        driver.set_page_load_timeout(120)
-        logging.info("Timeout de carga de página establecido en 120s.")
-        driver.implicitly_wait(10)
-        logging.info("Timeout implícito establecido en 10s.")
-        return driver
-    except Exception as e:
-        logging.exception("FALLO al inicializar WebDriver: %s", e)
-        raise
-
-@contextmanager
-def get_driver() -> Generator[webdriver.Chrome, None, None]:
-    """
-    Context manager para el WebDriver que se asegura de liberar los recursos al finalizar.
-    """
-    driver = None
-    try:
-        driver = init_driver()
-        yield driver
-    except Exception as e:
-        logging.exception("Error capturado por el context manager del driver: %s", e)
-        raise
-    finally:
-        if driver:
-            logging.info("Iniciando cierre del WebDriver...")
-            try:
-                driver.quit()
-                logging.info("WebDriver (driver.quit()) ejecutado correctamente.")
-            except WebDriverException as e:
-                 logging.error("WebDriverException al cerrar (driver.quit()) el WebDriver: %s. El navegador podría haber crasheado.", e.msg)
-            except Exception as e:
-                logging.error("Error inesperado al cerrar (driver.quit()) el WebDriver: %s", e)
-            finally:
-                time.sleep(2)
-                logging.info("Pausa de 2s después de driver.quit() completada.")
+# Función init_driver y get_driver eliminadas (Selenium removido)
 
 # ===== FUNCIONES PARA EL SCRAPING =====
 
-def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
+def scrape_promodescuentos_hot() -> str:
     """
-    Extrae el HTML de la página 'nuevas' de Promodescuentos usando Selenium.
+    Extrae el HTML de la página 'nuevas' de Promodescuentos usando requests.
     Incluye manejo de errores mejorado, guardado de HTML y limpieza de archivos de debug.
     """
     url = "https://www.promodescuentos.com/nuevas"
     html_content = ""
     debug_file_path = None # Ruta específica para el archivo en caso de error
     timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # Headers para simular un navegador real (Chrome en macOS)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
 
     # Asegurarse de que el directorio de debug exista
     os.makedirs(DEBUG_DIR, exist_ok=True)
 
     try:
-        logging.info(f"Accediendo a la URL: {url}")
-        driver.get(url)
+        logging.info(f"Accediendo a la URL: {url} con requests...")
+        response = requests.get(url, headers=headers, timeout=20)
 
-        # Espera solo por el body
-        logging.info("Esperando elemento 'body' (max 60s)...") # Aumentado timeout
-        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        logging.info("Elemento 'body' cargado.")
+        # Verificar status code
+        if response.status_code == 200:
+            html_content = response.text
+            logging.info(f"HTML obtenido (longitud: {len(html_content)} caracteres).")
+        else:
+            logging.error(f"Error scraping: Status Code {response.status_code}")
+            debug_file_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}ERROR_{response.status_code}_{timestamp}.html")
+            html_content = response.text # Guardar lo que nos devolvieron
 
-        # QUITAR/COMENTAR la espera específica por #listLayout ya que parece causar timeouts innecesarios
-        # deals_container_selector = "div#listLayout" # O "div#content-list.listLayout"
-        # try:
-        #     logging.info(f"Esperando contenedor de ofertas '{deals_container_selector}' (max 45s)...")
-        #     WebDriverWait(driver, 45).until(
-        #         EC.presence_of_element_located((By.CSS_SELECTOR, deals_container_selector))
-        #     )
-        #     logging.info("Contenedor de ofertas encontrado.")
-        # except TimeoutException:
-        #     logging.warning(f"Contenedor de ofertas '{deals_container_selector}' no encontrado después de 45s. La página podría estar vacía, haber cambiado o tener problemas de carga. Se continuará intentando obtener el HTML.")
-
-        # Opcional: Pausa estática si se sospecha de JS lento
-        # time.sleep(5)
-
-        logging.info("Obteniendo page source...")
-        html_content = driver.page_source # Intentar obtenerlo siempre
-        logging.info(f"HTML obtenido (longitud: {len(html_content)} caracteres).")
-
-    except TimeoutException as e:
-        logging.error(f"Error scraping (TimeoutException): La página o 'body' tardó demasiado. URL: {url}, Error: {e.msg}")
+    except requests.exceptions.Timeout:
+        logging.error(f"Error scraping (Timeout): La solicitud a {url} excedió el tiempo límite.")
         debug_file_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}TIMEOUT_{timestamp}.html")
-        # No retornar, intentar guardar HTML si es posible
-    except WebDriverException as e:
-        logging.error(f"Error scraping (WebDriverException): {e.msg}")
-        debug_file_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}WD_EXCEPTION_{e.__class__.__name__}_{timestamp}.html")
-        # No retornar
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error scraping (RequestException): {e}")
+        debug_file_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}REQ_EXCEPTION_{timestamp}.html")
     except Exception as e:
         logging.exception(f"Error inesperado durante scraping (URL: {url}): {e}")
         debug_file_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}UNEXPECTED_ERROR_{timestamp}.html")
-        # No retornar
 
     # --- Bloque de guardado de HTML (unificado para éxito o error) ---
     save_path = None
@@ -557,22 +467,15 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
     log_level = logging.INFO
     log_msg = ""
 
-    if html_content: # Éxito
+    if html_content and not debug_file_path: # Éxito (status 200)
          save_path = os.path.join(DEBUG_DIR, f"{DEBUG_FILE_PREFIX}SUCCESS_{timestamp}.html")
          log_msg = f"HTML guardado en {save_path}"
     elif debug_file_path: # Error (la ruta ya contiene el tipo de error)
          save_path = debug_file_path
          log_level = logging.WARNING # Loguear como warning si guardamos HTML de error
          log_msg = f"HTML en error guardado en {save_path}"
-         # Intentar obtener HTML si no se pudo antes y el driver sigue vivo
-         if not html_to_save and driver:
-             try:
-                 html_to_save = driver.page_source
-                 logging.info(f"Se obtuvo page source para HTML de error ({len(html_to_save)} chars).")
-             except Exception as ps_err:
-                 logging.error(f"No se pudo obtener page_source para guardar HTML de error en {save_path}: {ps_err}")
-                 html_to_save = "<!-- No se pudo obtener page_source durante el error -->" # Placeholder
     else:
+         # Caso raro donde html_content está vacío pero no hubo excepción (ej. respuesta vacía 200)
          logging.warning("No se generó HTML ni ruta de archivo de debug para guardar.")
 
     if save_path and html_to_save:
@@ -585,12 +488,13 @@ def scrape_promodescuentos_hot(driver: webdriver.Chrome) -> str:
          except Exception as save_err:
               logging.error(f"Fallo crítico al intentar guardar HTML en {save_path}: {save_err}")
 
-    return html_to_save # Devolver el contenido (o vacío/placeholder si falló)
+    return html_to_save
 
 
 def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
     """
-    Parsea el HTML con BeautifulSoup y extrae la información de las ofertas.
+    Parses the HTML with BeautifulSoup and extracts deal information.
+    Prioritizes extracting data from 'data-vue3' JSON attributes for reliability.
     """
     logging.info("Iniciando parseo de ofertas desde HTML...")
     articles = soup.select("article.thread.thread--type-card")
@@ -604,147 +508,210 @@ def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
     for i, art in enumerate(articles):
         deal_info = {}
         link = "N/A"
+        
+        # --- Strategy 1: Extract from Vue JSON (Preferred) ---
+        vue_data = {}
         try:
-            title_element = art.select_one("strong.thread-title a.thread-link, a.cept-tt.thread-link")
-            if not title_element:
-                logging.debug(f"Artículo #{i+1}: Sin elemento de título/link. Saltando.")
-                continue
+            # Find the divs with Vue data. 
+            # We look for any .js-vue3 div and check its content
+            vue_elements = art.select("div.js-vue3[data-vue3]")
+            for el in vue_elements:
+                try:
+                    data_attr = el.get("data-vue3")
+                    if not data_attr: continue
+                    json_data = json.loads(data_attr)
+                    
+                    # Target specific component
+                    if json_data.get("name") == "ThreadMainListItemNormalizer":
+                        vue_props = json_data.get("props", {}).get("thread", {})
+                        if vue_props:
+                            vue_data = vue_props
+                            break
+                except json.JSONDecodeError:
+                    continue
+        except Exception as e:
+            logging.warning(f"Error extracting Vue JSON for article #{i+1}: {e}")
 
-            link = title_element.get("href", "").strip()
+        # --- Extract Fields (JSON > HTML) ---
+
+        # 1. Title & URL
+        try:
+            if vue_data:
+                title = vue_data.get("title")
+                # Construct URL if 'link' is empty or relative
+                # The JSON often has 'titleSlug' and 'threadId'
+                if vue_data.get("titleSlug") and vue_data.get("threadId"):
+                     # Standard format: https://www.promodescuentos.com/ofertas/slug-id
+                     link = f"https://www.promodescuentos.com/ofertas/{vue_data['titleSlug']}-{vue_data['threadId']}"
+                else:
+                     link = vue_data.get("shareableLink") or vue_data.get("link")
+            else:
+                # Fallback to HTML
+                title_element = art.select_one("strong.thread-title a.thread-link, a.cept-tt.thread-link")
+                if not title_element:
+                    logging.debug(f"Artículo #{i+1}: Sin elemento de título/link. Saltando.")
+                    continue
+                title = title_element.get_text(strip=True)
+                link = title_element.get("href", "").strip()
+
             if not link:
-                logging.debug(f"Artículo #{i+1}: Elemento de título sin href. Saltando.")
+                logging.debug(f"Artículo #{i+1}: Link vacío. Saltando.")
                 continue
             if link.startswith("/"):
                 link = "https://www.promodescuentos.com" + link
+            
             deal_info["url"] = link
+            deal_info["title"] = title
 
             if link in processed_urls:
-                logging.debug(f"Artículo #{i+1}: URL duplicada en esta página ({link}). Saltando.")
+                logging.debug(f"Artículo #{i+1}: URL duplicada ({link}). Saltando.")
                 continue
             processed_urls.add(link)
 
-            title = title_element.get_text(strip=True)
-            deal_info["title"] = title
+        except Exception as e:
+             logging.error(f"Error extracting title/url for article #{i+1}: {e}")
+             continue
 
-            temp_element = art.select_one(".vote-box span.vote-temp, .cept-vote-temp")
-            temperature = 0.0
-            if temp_element:
-                # Limpieza básica: quitar grados, comas, espacios extra. ¡NO quitar el '-' aún!
-                temp_text = temp_element.get_text(strip=True).replace("°", "").replace(",", "").strip()
-                # Regex mejorado para capturar número con signo negativo opcional
-                m_temp = re.search(r"(-?\d+(\.\d+)?)", temp_text)
-                if m_temp:
-                    try:
-                        # El grupo 1 ahora incluye el signo si existe
-                        temperature = float(m_temp.group(1))
-                        logging.debug(f"Temperatura extraída: {temperature} para {link}")
-                    except ValueError:
-                        logging.warning(f"Valor temp no numérico después de regex: '{m_temp.group(1)}' para {link}.")
+        # 2. Temperature
+        deal_info["temperature"] = 0
+        try:
+            if vue_data and "temperature" in vue_data:
+                deal_info["temperature"] = float(vue_data["temperature"])
+            else:
+                # Fallback HTML
+                temp_element = art.select_one(".vote-temp") 
+                if temp_element:
+                    temp_text = temp_element.get_text(strip=True).replace("°", "").strip()
+                    # Try validation roughly
+                    if re.match(r"^-?\d+(\.\d+)?$", temp_text):
+                        deal_info["temperature"] = float(temp_text)
+        except (ValueError, TypeError):
+            deal_info["temperature"] = 0
+
+        # 3. Time / Published At
+        deal_info["hours_since_posted"] = 999.0
+        deal_info["posted_or_updated"] = "Desconocido"
+        
+        try:
+            if vue_data and "publishedAt" in vue_data:
+                published_at = int(vue_data["publishedAt"])
+                if published_at > 0:
+                    current_ts = time.time()
+                    # hours = seconds / 3600
+                    hours_since = (current_ts - published_at) / 3600
+                    deal_info["hours_since_posted"] = hours_since
+                    
+                    # Generate a human readable string for notification
+                    if hours_since < 1:
+                        deal_info["posted_or_updated"] = f"Hace {int(hours_since*60)} m"
+                    elif hours_since < 24:
+                         deal_info["posted_or_updated"] = f"Hace {int(hours_since)} h"
+                    else:
+                         deal_info["posted_or_updated"] = f"Hace {int(hours_since/24)} d"
                 else:
-                     # Puede que haya texto como 'Nuevas' si el selector falla, añadir log
-                     logging.warning(f"No se pudo extraer temp con regex del texto: '{temp_text}' para {link}.")
+                     deal_info["hours_since_posted"] = 999.0
             else:
-                logging.debug(f"No se encontró elem. temp (selector: .vote-box span.vote-temp, .cept-vote-temp) para {link}.")
-            deal_info["temperature"] = temperature
+                # Fallback HTML - often missing in static HTML for Requests
+                time_element = art.select_one("span.chip span.size--all-s")
+                if time_element:
+                    posted_text = time_element.get_text(strip=True)
+                    deal_info["posted_text"] = posted_text
+                    deal_info["posted_or_updated"] = posted_text
+                    
+                    hours = 999.0
+                    if "min" in posted_text or "m" in posted_text.split():
+                         m = re.search(r"(\d+)", posted_text)
+                         if m: hours = int(m.group(1)) / 60.0
+                    elif "h" in posted_text:
+                         m = re.search(r"(\d+)", posted_text)
+                         if m: hours = float(m.group(1))
+                    elif "d" in posted_text:
+                         m = re.search(r"(\d+)", posted_text)
+                         if m: hours = int(m.group(1)) * 24.0
+                    
+                    if hours != 999.0:
+                        deal_info["hours_since_posted"] = hours
 
-            time_element = art.select_one("span.chip span.size--all-s")
-            total_hours = 999.0 # Valor por defecto si no se encuentra o falla el parseo
-            posted_or_updated = "Desconocido"
-            if time_element:
-                posted_text = time_element.get_text(strip=True)
-                deal_info["posted_text"] = posted_text # Guardar el texto original puede ser útil para debug
-                # La lógica existente para determinar 'posted_or_updated' y extraer horas/minutos debería seguir funcionando bien
-                posted_or_updated = "Actualizado" if ("Actualizado" in posted_text or "Editado" in posted_text or "Expiró" in posted_text) else "Publicado" # Ajuste para incluir 'Expiró' como 'Actualizado' en términos de estado, aunque el tiempo se calcule igual.
-                hours, minutes, days = 0, 0, 0
-                m_days = re.search(r"(\d+)\s*d", posted_text, re.IGNORECASE)
-                if m_days: days = int(m_days.group(1))
-                m_hrs = re.search(r"(\d+)\s*h", posted_text, re.IGNORECASE)
-                if m_hrs: hours = int(m_hrs.group(1))
-                m_min = re.search(r"(\d+)\s*m(?:in)?", posted_text, re.IGNORECASE) # Añadido 'in' opcional por si acaso
-                if m_min: minutes = int(m_min.group(1))
+        except Exception:
+             deal_info["hours_since_posted"] = 999.0
 
-                # Si no se encuentran números, podría ser "Hace un momento" o similar
-                if days == 0 and hours == 0 and minutes == 0 and not re.search(r'\d', posted_text):
-                    total_hours = 0.0 # Considerarlo como recién publicado
-                    logging.debug(f"Tiempo interpretado como 0.0 horas para '{posted_text}' en {link}")
-                elif days > 0 or hours > 0 or minutes > 0: # Solo calcular si se encontró alguna unidad de tiempo
-                    total_hours = (days * 24) + hours + (minutes / 60.0)
-                    logging.debug(f"Tiempo calculado como {total_hours:.2f} horas para '{posted_text}' en {link}")
-                else:
-                    # Si no se encontró nada pero sí el elemento time_element (caso raro)
-                    logging.warning(f"No se pudieron extraer unidades de tiempo (d/h/m) del texto: '{posted_text}' para {link}. Usando default 999.0")
-                    # total_hours se queda en 999.0 (el default)
-            else:
-                logging.debug(f"No se encontró elem. tiempo (selector: 'span.chip span.size--all-s') para {link}. Usando default 999.0")
-                # total_hours se queda en 999.0 (el default)
+        # 4. Merchant
+        if vue_data and "merchant" in vue_data and vue_data["merchant"]:
+             deal_info["merchant"] = vue_data["merchant"].get("merchantName", "N/D")
+        else:
+            merchant_element = art.select_one('a[data-t="merchantLink"]')
+            deal_info["merchant"] = merchant_element.get_text(strip=True).replace("Disponible en", "").strip() if merchant_element else "N/D"
 
-            deal_info["hours_since_posted"] = total_hours
-            deal_info["posted_or_updated"] = posted_or_updated
-
-            merchant_element = art.select_one('a[data-t="merchantLink"]') # Busca el enlace marcado específicamente como link de comerciante
-
-            merchant = "N/D" # Valor por defecto si no se encuentra
-            if merchant_element:
-                merchant_text = merchant_element.get_text(strip=True)
-                # A veces puede incluir texto extra, aunque en el ejemplo no parece ser el caso.
-                # Una limpieza simple por si acaso:
-                merchant = merchant_text.replace("Disponible en", "").strip()
-                if not merchant: # Si después de limpiar queda vacío
-                    merchant = "N/D"
-                    logging.warning(f"Merchant element encontrado pero texto vacío o solo 'Disponible en' para {link}")
-            else:
-                # Añadimos un log específico para saber si no encuentra el elemento
-                logging.debug(f"No se encontró el elemento del comerciante (selector: 'a[data-t=\"merchantLink\"]') para {link}")
-
-            deal_info["merchant"] = merchant
-            # --- FIN: Corrección para extraer Comercio ---
-
-
+        # 5. Price
+        if vue_data:
+             price_val = vue_data.get("price", 0)
+             if price_val > 0:
+                 deal_info["price_display"] = f"${price_val:,.2f}"
+             else:
+                 deal_info["price_display"] = "Gratis" if price_val == 0 else "N/D"
+        else:
             price_element = art.select_one(".thread-price")
-            price_display = price_element.get_text(strip=True) if price_element else "N/D"
-            deal_info["price_display"] = price_display
+            deal_info["price_display"] = price_element.get_text(strip=True) if price_element else "N/D"
 
-            discount_percentage = None
-            discount_badge = art.select_one(".thread-discount, .textBadge--green")
-            if discount_badge:
-                discount_text = discount_badge.get_text(strip=True)
-                m_discount = re.search(r"-?(\d+)%", discount_text)
-                if m_discount: discount_percentage = f"{m_discount.group(1)}%"
-            deal_info["discount_percentage"] = discount_percentage
+        # 6. Discount %
+        deal_info["discount_percentage"] = None
+        # Not always in JSON top level, but let's check HTML fallback primarily
+        discount_badge = art.select_one(".thread-discount, .textBadge--green")
+        if discount_badge:
+            discount_text = discount_badge.get_text(strip=True)
+            m_discount = re.search(r"-?(\d+)%", discount_text)
+            if m_discount: deal_info["discount_percentage"] = f"{m_discount.group(1)}%"
 
-            image_element = art.select_one("img.thread-image")
-            image_url = 'No Image'
-            image_url_base = 'No Image'
-            if image_element:
-                image_url = image_element.get('data-src', image_element.get('src', 'No Image'))
-            if image_url and image_url != 'No Image':
-                image_url_base = image_url.split("?")[0]
-                if "/re/" in image_url_base: image_url_base = image_url_base.split("/re/")[0]
-                if image_url_base.startswith("//"): image_url_base = "https:" + image_url_base
-                if not image_url_base.startswith(('http://', 'https://')):
-                    logging.warning(f"URL de imagen inválida: '{image_url_base}' para {link}. Marcando 'No Image'.")
-                    image_url_base = 'No Image'
-            deal_info["image_url"] = image_url_base
+        # 7. Image
+        image_url = 'No Image'
+        try:
+            # Try to construct from Vue data first
+            if vue_data:
+                main_image = vue_data.get("mainImage")
+                if main_image:
+                    path = main_image.get("path")
+                    name = main_image.get("name")
+                    if path and name:
+                        image_url = f"https://static.promodescuentos.com/{path}/{name}.jpg"
+            
+            # Fallback to HTML if Vue data didn't work
+            if image_url == 'No Image':
+                image_element = art.select_one("img.thread-image")
+                if image_element:
+                     image_url = image_element.get('data-src', image_element.get('src', 'No Image'))
+                
+                if image_url != 'No Image' and image_url.startswith("//"):
+                    image_url = "https:" + image_url
+        except Exception as e:
+            logging.warning(f"Error extracting image for {link}: {e}")
 
-            description_element = art.select_one(".thread-description .userHtml-content, .userHtml.userHtml-content div")
-            description = "No disponible"
-            if description_element:
-                description = description_element.get_text(strip=True, separator=' ')
-                max_desc_len = 250
-                if len(description) > max_desc_len: description = description[:max_desc_len].strip() + "..."
-            deal_info["description"] = description
+        # Basic validation
+        if not image_url.startswith(('http://', 'https://')):
+             if image_url != 'No Image':
+                  logging.warning(f"URL de imagen inválida/incompleta: '{image_url}' para {link}. Resetting to 'No Image'.")
+             image_url = 'No Image'
 
-            coupon_code = None
+        deal_info["image_url"] = image_url
+
+        # 8. Description
+        description = "No disponible"
+        desc_element = art.select_one(".thread-description .userHtml-content, .userHtml.userHtml-content div")
+        if desc_element:
+            description = desc_element.get_text(strip=True, separator=' ')
+            if len(description) > 250: description = description[:250].strip() + "..."
+        deal_info["description"] = description
+
+        # 9. Coupon
+        coupon_code = None
+        if vue_data and "voucherCode" in vue_data and vue_data["voucherCode"]:
+            coupon_code = vue_data["voucherCode"]
+        else:
             coupon_element = art.select_one(".voucher .buttonWithCode-code")
             if coupon_element: coupon_code = coupon_element.get_text(strip=True)
-            deal_info["coupon_code"] = coupon_code
+        deal_info["coupon_code"] = coupon_code
 
-            final_deal = {k: v for k, v in deal_info.items() if v is not None}
-            deals_data.append(final_deal)
-
-        except Exception as e:
-            logging.exception(f"Error procesando artículo #{i+1} (URL: {link}): {e}. Datos parciales: {deal_info}")
-            continue
+        final_deal = {k: v for k, v in deal_info.items() if v is not None}
+        deals_data.append(final_deal)
 
     logging.info(f"Se parsearon {len(deals_data)} ofertas después de filtrar duplicados y errores internos.")
     return deals_data
@@ -1100,9 +1067,9 @@ def main() -> None:
             break # Salir del bucle while inmediatamente
 
         try:
-            logging.info("Revisando Promodescuentos...")
-            with get_driver() as driver:
-                html = scrape_promodescuentos_hot(driver)
+            logging.info("Revisando Promodescuentos con requests...")
+            # Ya no usamos driver context manager
+            html = scrape_promodescuentos_hot()
 
             if not html:
                 logging.warning("No se pudo obtener el HTML de la página en esta iteración.")
@@ -1159,8 +1126,8 @@ def main() -> None:
 
                 iteration_successful = True # Iteración exitosa si obtuvimos y parseamos HTML
 
-        except (WebDriverException, TimeoutException) as driver_error:
-            logging.error(f"Error de WebDriver/Timeout durante la iteración #{iteration_count}: {driver_error}")
+        except requests.exceptions.RequestException as req_error:
+            logging.error(f"Error de solicitud (Requests) durante la iteración #{iteration_count}: {req_error}")
         except Exception as loop_exception:
             logging.exception(f"Excepción inesperada en la iteración #{iteration_count}: {loop_exception}")
 
