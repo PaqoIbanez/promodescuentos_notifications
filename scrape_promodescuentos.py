@@ -12,8 +12,11 @@ import glob # Para buscar archivos con patrones
 import sys # Para salir limpiamente
 
 import requests
+import psycopg2 
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+from optimizer import AutoTuner
 
 
 
@@ -67,7 +70,19 @@ HISTORY_FILE: str = "deals_history.csv"
 # ==== CONFIGURACIONES DE DEBUG ==== (Constantes globales)
 DEBUG_DIR = os.getenv("DEBUG_DIR", "debug")
 DEBUG_FILE_PREFIX = "debug_html_"
+DEBUG_FILE_PREFIX = "debug_html_"
 KEEP_DEBUG_FILES = 5 # Número de archivos de debug a conservar
+
+# ==== CONFIGURACIÓN DINÁMICA (BD) ====
+# Valores por defecto que serán sobrescritos por la BD
+SYSTEM_CONFIG: Dict[str, float] = {
+    "velocity_instant_kill": 1.7,
+    "velocity_fast_rising": 1.1,
+    "min_temp_instant_kill": 15.0,
+    "min_temp_fast_rising": 30.0
+}
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 # ==== CONFIGURACIONES DE SCRAPING ====
 def is_deal_valid(deal: Dict[str, Any]) -> bool:
@@ -290,36 +305,63 @@ def save_subscribers_global(filepath: str) -> None:
             except OSError as remove_err:
                 logging.error(f"Error eliminando archivo temporal {temp_filepath} de suscriptores: {remove_err}")
 
-def log_deal_to_history(deal: Dict[str, Any]) -> None:
+def log_deal_to_db(deal: Dict[str, Any], source: str = "hunter") -> None:
     """
-    Registra los datos de la oferta en un CSV para análisis posterior (Data Science).
-    Campos: Timestamp, Url, Title, Temperature, Hours, Velocity
+    Registra la oferta y su historia en la Base de Datos.
+    source: 'hunter' (nuevas) o 'historian' (calientes)
     """
-    file_exists = os.path.isfile(HISTORY_FILE)
+    conn = get_db_connection()
+    if not conn:
+        return
+
     try:
-        with open(HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            
-            # Escribir header si es archivo nuevo
-            if not file_exists:
-                writer.writerow(["timestamp", "url", "title", "temperature", "hours_since_posted", "velocity"])
-            
-            # Calcular velocidad
-            temp = float(deal.get("temperature", 0))
-            hours = float(deal.get("hours_since_posted", 0))
-            minutes = max(1, hours * 60)
-            velocity = temp / minutes
-            
-            writer.writerow([
-                time.strftime("%Y-%m-%d %H:%M:%S"),
-                deal.get("url", "N/A"),
-                deal.get("title", "N/A"),
-                temp,
-                hours,
-                f"{velocity:.4f}"
-            ])
+        cur = conn.cursor()
+        
+        # 1. Insertar o actualizar Deal (Tabla Maestra)
+        # Usamos ON CONFLICT para ignorar si ya existe (la URL es única)
+        # Podríamos actualizar title/image si cambian, pero por ahora ignoramos.
+        cur.execute("""
+            INSERT INTO deals (url, title, merchant, image_url)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (url) DO UPDATE SET 
+                title = EXCLUDED.title,
+                merchant = EXCLUDED.merchant,
+                image_url = EXCLUDED.image_url
+            RETURNING id;
+        """, (
+            deal.get("url"),
+            deal.get("title"),
+            deal.get("merchant", ""),
+            deal.get("image_url", "")
+        ))
+        
+        result = cur.fetchone()
+        if result:
+            deal_id = result[0]
+        else:
+            # Si no devolvió ID (caso raro con DO NOTHING, pero aquí usamos UPDATE), buscamos el ID
+            cur.execute("SELECT id FROM deals WHERE url = %s", (deal.get("url"),))
+            deal_id = cur.fetchone()[0]
+
+        # 2. Insertar Histórico (Timeseries)
+        temp = float(deal.get("temperature", 0))
+        hours = float(deal.get("hours_since_posted", 0))
+        minutes = max(1, hours * 60)
+        velocity = temp / minutes
+
+        cur.execute("""
+            INSERT INTO deal_history (deal_id, temperature, velocity, hours_since_posted, source)
+            VALUES (%s, %s, %s, %s, %s);
+        """, (deal_id, temp, velocity, hours, source))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        # logging.debug(f"Deal logged to DB: {deal.get('url')} ({source})")
+
     except Exception as e:
-        logging.error(f"Error escribiendo en historial ({HISTORY_FILE}): {e}")
+        logging.error(f"Error escribiendo en DB: {e}")
+        if conn: conn.close()
 
 # ===== FUNCIONES DE RATING =====
 
@@ -1124,22 +1166,50 @@ def main() -> None:
     restart_interval_seconds = 12 * 60 * 60 # 12 horas
     start_time = time.time() # Registrar hora de inicio
 
+    # Cargar configuración inicial
+    logging.info("🧠 Ejecutando Auto-Tuner (Optimizador) al inicio...")
+    try:
+        AutoTuner().optimize()
+    except Exception as e:
+        logging.error(f"Error ejecutando AutoTuner al inicio: {e}")
+
+    load_config_from_db()
+
     # --- Bucle Principal ---
     while not shutdown_flag.is_set():
         iteration_count += 1
         logging.info(f"\n===== INICIO Iteración #{iteration_count} =====")
         iteration_successful = False
 
+        # --- RECARGAR CONFIG (Cada hora aprox o cada iteración si es ligero) ---
+        if iteration_count % 6 == 0:
+            load_config_from_db()
+
         # --- Comprobar tiempo para reinicio programado ---
         elapsed_time = time.time() - start_time
         if elapsed_time >= restart_interval_seconds:
             logging.warning(f"Tiempo de ejecución ({elapsed_time:.0f}s) ha superado el intervalo de reinicio ({restart_interval_seconds}s). Iniciando apagado programado.")
             shutdown_flag.set()
-            break # Salir del bucle while inmediatamente
+            break 
 
         try:
-            logging.info("Revisando Promodescuentos con requests...")
-            # Ya no usamos driver context manager
+            # === THE HISTORIAN (Cada ~6 ciclos / 1 hora) ===
+            # Recolecta datos de ofertas "Winners" para aprender
+            if iteration_count % 6 == 0:
+                logging.info("📜 MODO HISTORIAN ACTIVADO (Scraping /las-mas-hot)...")
+                html_hist = scrape_promodescuentos_historian()
+                if html_hist:
+                    soup_hist = BeautifulSoup(html_hist, "html.parser")
+                    deals_hist = parse_deals(soup_hist)
+                    logging.info(f"Historian: {len(deals_hist)} ofertas recolectadas.")
+                    for deal in deals_hist:
+                        log_deal_to_db(deal, source="historian")
+                else:
+                    logging.warning("Historian: No se pudo obtener HTML.")
+
+            # === THE HUNTER (Siempre) ===
+            # Busca ofertas nuevas para notificar
+            logging.info("⚔️ MODO HUNTER ACTIVADO (Scraping /nuevas)...")
             html = scrape_promodescuentos_hot()
 
             if not html:
@@ -1148,10 +1218,10 @@ def main() -> None:
                 soup = BeautifulSoup(html, "html.parser")
                 deals = parse_deals(soup)
                 
-                # --- LOGGING FOR DATA SCIENCE (THE HARVESTER) ---
+                # --- LOGGING TO DB (THE HARVESTER) ---
                 for deal in deals:
-                    log_deal_to_history(deal)
-                # -----------------------------------------------
+                    log_deal_to_db(deal, source="hunter")
+                # -------------------------------------
 
                 valid_deals = filter_new_hot_deals(deals)
                 new_deals_found_count = 0
