@@ -57,8 +57,12 @@ if ADMIN_CHAT_IDS_STR:
 
 # Archivo para guardar ofertas ya vistas
 SEEN_FILE: str = "seen_hot_deals.json"
+import csv # Para el logger de ofertas
+
 # Archivo para guardar suscriptores
 SUBSCRIBERS_FILE: str = "subscribers.json"
+# Archivo para histórico de análisis (Data Science)
+HISTORY_FILE: str = "deals_history.csv"
 
 # ==== CONFIGURACIONES DE DEBUG ==== (Constantes globales)
 DEBUG_DIR = os.getenv("DEBUG_DIR", "debug")
@@ -96,7 +100,28 @@ def is_deal_valid(deal: Dict[str, Any]) -> bool:
 
     # --- Condiciones originales (ahora con temp_float y hours_float) ---
     # Ahora las temperaturas negativas serán filtradas aquí automáticamente porque temp_float será < 150
-    if temp_float >= 10 and hours_float < 1:
+    # --- Condiciones originales (ahora con temp_float y hours_float) ---
+    # Ahora las temperaturas negativas serán filtradas aquí automáticamente porque temp_float será < 150
+    
+    # --- PROCESAMIENTO DE "VELOCIDAD TÉRMICA" (EARLY DETECTION) ---
+    # Calcular minutos para evitar división por cero o tiempos muy pequeños
+    minutes_since_posted = max(1, hours_float * 60)
+    velocity = temp_float / minutes_since_posted
+    
+    # 1. Regla "INSTANT KILL" (< 15 min, velocidad extrema > 2.0°/min)
+    # Detecta errores de precio o liquidaciones instantáneas.
+    if minutes_since_posted <= 15 and velocity >= 3.0 and temp_float >= 15:
+        logging.info(f"Deal {deal.get('url', 'N/A')} validado por VELOCIDAD EXTREMA (Vel: {velocity:.2f}°/min, Temp: {temp_float}, Min: {minutes_since_posted:.1f})")
+        return True
+
+    # 2. Regla "SUBIDA RÁPIDA" (< 30 min, velocidad alta > 1.2°/min)
+    # Detecta ofertas muy buenas ganando tracción.
+    if minutes_since_posted <= 30 and velocity >= 2 and temp_float >= 30:
+        logging.info(f"Deal {deal.get('url', 'N/A')} validado por SUBIDA RÁPIDA (Vel: {velocity:.2f}°/min, Temp: {temp_float}, Min: {minutes_since_posted:.1f})")
+        return True
+
+    # --- Reglas Estáticas (Legacy + Seguridad) ---
+    if temp_float >= 150 and hours_float < 1:
         logging.debug(f"Deal {deal.get('url', 'N/A')} validado por Regla 1 (Temp: {temp_float}, Horas: {hours_float})")
         return True
     if temp_float >= 300 and hours_float < 2:
@@ -265,6 +290,37 @@ def save_subscribers_global(filepath: str) -> None:
             except OSError as remove_err:
                 logging.error(f"Error eliminando archivo temporal {temp_filepath} de suscriptores: {remove_err}")
 
+def log_deal_to_history(deal: Dict[str, Any]) -> None:
+    """
+    Registra los datos de la oferta en un CSV para análisis posterior (Data Science).
+    Campos: Timestamp, Url, Title, Temperature, Hours, Velocity
+    """
+    file_exists = os.path.isfile(HISTORY_FILE)
+    try:
+        with open(HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            
+            # Escribir header si es archivo nuevo
+            if not file_exists:
+                writer.writerow(["timestamp", "url", "title", "temperature", "hours_since_posted", "velocity"])
+            
+            # Calcular velocidad
+            temp = float(deal.get("temperature", 0))
+            hours = float(deal.get("hours_since_posted", 0))
+            minutes = max(1, hours * 60)
+            velocity = temp / minutes
+            
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                deal.get("url", "N/A"),
+                deal.get("title", "N/A"),
+                temp,
+                hours,
+                f"{velocity:.4f}"
+            ])
+    except Exception as e:
+        logging.error(f"Error escribiendo en historial ({HISTORY_FILE}): {e}")
+
 # ===== FUNCIONES DE RATING =====
 
 def get_deal_rating(deal: Dict[str, Any]) -> int:
@@ -283,6 +339,15 @@ def get_deal_rating(deal: Dict[str, Any]) -> int:
         temp = 0
         hours = 999 # Treat as very old if data is bad
 
+    minutes_since_posted = max(1, hours * 60)
+    velocity = temp / minutes_since_posted
+
+    # --- RATING POR VELOCIDAD ---
+    # Si es una oferta "Early Bird", tiene prioridad máxima.
+    if minutes_since_posted <= 30 and velocity >= 1.2:
+        return 4 # Fuego máximo para ofertas rápidas
+
+    # --- RATING ESTÁTICO (Legacy) ---
     if temp < 300 and hours < 2:
         if hours < 0.5: return 4
         elif hours < 1: return 3
@@ -758,6 +823,12 @@ class RequestHandler(BaseHTTPRequestHandler): # Renombrado de HealthCheckHandler
             self._serve_debug_index()
         elif self.path.startswith('/debug/'):
             self._serve_debug_file()
+        elif self.path == '/history' or self.path == '/deals_history.csv':
+            # Servir el archivo de historial CSV
+            if os.path.exists(HISTORY_FILE):
+                self._send_file_response(HISTORY_FILE)
+            else:
+                self._send_error(404, "Archivo de historial no encontrado (aún no se han procesado ofertas).")
         # Podrías añadir un endpoint GET para /webhook/<TOKEN> para verificar que está configurado,
         # pero Telegram usa POST para enviar actualizaciones.
         else:
@@ -1076,6 +1147,12 @@ def main() -> None:
             else:
                 soup = BeautifulSoup(html, "html.parser")
                 deals = parse_deals(soup)
+                
+                # --- LOGGING FOR DATA SCIENCE (THE HARVESTER) ---
+                for deal in deals:
+                    log_deal_to_history(deal)
+                # -----------------------------------------------
+
                 valid_deals = filter_new_hot_deals(deals)
                 new_deals_found_count = 0
 
