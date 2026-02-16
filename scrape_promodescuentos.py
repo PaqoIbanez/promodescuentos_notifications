@@ -305,6 +305,42 @@ def save_subscribers_global(filepath: str) -> None:
             except OSError as remove_err:
                 logging.error(f"Error eliminando archivo temporal {temp_filepath} de suscriptores: {remove_err}")
 
+# ===== FUNCIONES DE BASE DE DATOS =====
+
+def get_db_connection():
+    """Establece conexión a la BD PostgreSQL."""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logging.error(f"Error conectando a la BD: {e}")
+        return None
+
+def load_config_from_db():
+    """Carga configuración dinámica desde la tabla system_config."""
+    global SYSTEM_CONFIG
+    conn = get_db_connection()
+    if not conn:
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM system_config")
+        rows = cur.fetchall()
+        
+        for key, val in rows:
+            try:
+                SYSTEM_CONFIG[key] = float(val)
+            except ValueError:
+                pass # Ignorar valores no numéricos si los hay
+        
+        logging.info(f"Configuración recargada desde BD: {SYSTEM_CONFIG}")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Error cargando config desde BD: {e}")
+        if conn: conn.close()
+
 def log_deal_to_db(deal: Dict[str, Any], source: str = "hunter") -> None:
     """
     Registra la oferta y su historia en la Base de Datos.
