@@ -118,10 +118,10 @@ class AutoTuner:
                     # Upsert config
                     cur.execute("""
                         INSERT INTO system_config (key, value, updated_at) 
-                        VALUES (%s, %s, NOW())
+                        VALUES (%s, %s, (NOW() AT TIME ZONE 'America/Mexico_City'))
                         ON CONFLICT (key) DO UPDATE SET 
                             value = EXCLUDED.value,
-                            updated_at = NOW();
+                            updated_at = (NOW() AT TIME ZONE 'America/Mexico_City');
                     """, (key, str(val)))
                 conn.commit()
                 logging.info("✅ Configuración optimizada exitosamente.")

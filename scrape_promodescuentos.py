@@ -357,8 +357,8 @@ def log_deal_to_db(deal: Dict[str, Any], source: str = "hunter") -> None:
         # Usamos ON CONFLICT para ignorar si ya existe (la URL es única)
         # Podríamos actualizar title/image si cambian, pero por ahora ignoramos.
         cur.execute("""
-            INSERT INTO deals (url, title, merchant, image_url)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO deals (url, title, merchant, image_url, created_at)
+            VALUES (%s, %s, %s, %s, (NOW() AT TIME ZONE 'America/Mexico_City'))
             ON CONFLICT (url) DO UPDATE SET 
                 title = EXCLUDED.title,
                 merchant = EXCLUDED.merchant,
@@ -386,8 +386,8 @@ def log_deal_to_db(deal: Dict[str, Any], source: str = "hunter") -> None:
         velocity = temp / minutes
 
         cur.execute("""
-            INSERT INTO deal_history (deal_id, temperature, velocity, hours_since_posted, source)
-            VALUES (%s, %s, %s, %s, %s);
+            INSERT INTO deal_history (deal_id, temperature, velocity, hours_since_posted, source, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, (NOW() AT TIME ZONE 'America/Mexico_City'));
         """, (deal_id, temp, velocity, hours, source))
 
         conn.commit()
