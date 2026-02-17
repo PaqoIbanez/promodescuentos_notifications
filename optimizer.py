@@ -11,13 +11,7 @@ from typing import List, Dict, Tuple, Optional
 load_dotenv()
 
 # Setup Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [OPTIMIZER] %(message)s",
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+# Logging setup moved to __main__ block to avoid overriding importer's config
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -142,5 +136,13 @@ class AutoTuner:
             if conn: conn.close()
 
 if __name__ == "__main__":
+    # Setup Logging for standalone execution
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] [OPTIMIZER] %(message)s",
+        handlers=[
+            logging.StreamHandler()
+        ]
+    )
     tuner = AutoTuner()
     tuner.optimize()
