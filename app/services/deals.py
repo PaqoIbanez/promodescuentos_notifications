@@ -10,13 +10,14 @@ class DealsService:
         self.deals_repo = deals_repository
         self.session = deals_repository.session
 
-    async def process_new_deal(self, deal_data: Dict[str, Any], viral_score: float = 0.0) -> bool:
+    async def process_new_deal(self, deal_data: Dict[str, Any], viral_score: float = 0.0) -> Optional[int]:
         """
         Atomically saves a deal and its initial history.
         Implements Unit of Work pattern: saves both or neither.
+        Returns deal_id if successful, None otherwise.
         """
         if not deal_data.get("url"):
-            return False
+            return None
 
         try:
             # 1. Save Deal
@@ -35,9 +36,9 @@ class DealsService:
 
             # 3. Atomic Commit
             await self.session.commit()
-            return True
+            return deal_id
 
         except Exception as e:
             logger.error(f"Transaction failed for deal {deal_data.get('url')}: {e}")
             await self.session.rollback()
-            return False
+            return None

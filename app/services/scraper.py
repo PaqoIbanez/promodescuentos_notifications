@@ -293,3 +293,66 @@ class ScraperService:
         except Exception as e: pass
 
         return deal_info
+
+    def parse_deal_detail(self, html_content: str) -> Dict[str, Any]:
+        """
+        Parses a specific deal detail page using the global window.__INITIAL_STATE__ object.
+        This provides more reliable data than DOM scraping for detail pages.
+        """
+        data = {}
+        try:
+            # Extract JSON state
+            match = re.search(r"window\.__INITIAL_STATE__\s*=\s*({.*?});", html_content, re.DOTALL)
+            if not match:
+                logger.warning("Could not find window.__INITIAL_STATE__ in deal detail page.")
+                return {}
+            
+            state = json.loads(match.group(1))
+            thread_detail = state.get("threadDetail", {})
+            
+            if not thread_detail:
+                logger.warning("No 'threadDetail' found in initial state.")
+                return {}
+
+            # Basic Info
+            data["thread_id"] = thread_detail.get("threadId")
+            data["title"] = thread_detail.get("title")
+            data["url"] = thread_detail.get("url") or thread_detail.get("shareableLink")
+            data["price"] = thread_detail.get("price")
+            data["temperature"] = thread_detail.get("temperature")
+            data["description"] = thread_detail.get("descriptionPurified")
+            
+            # Status
+            data["is_expired"] = thread_detail.get("isExpired", False)
+            data["status"] = thread_detail.get("status") # e.g. "Activated"
+            data["is_active"] = not data["is_expired"] and data["status"] == "Activated"
+
+            # Times
+            data["published_at"] = thread_detail.get("publishedAt")
+            data["updated_at"] = thread_detail.get("updatedAt")
+
+            # Image
+            main_image = thread_detail.get("mainImage", {})
+            if main_image and main_image.get("path") and main_image.get("name"):
+                 data["image_url"] = f"https://static.promodescuentos.com/{main_image['path']}/{main_image['name']}.jpg"
+
+            # Merchant
+            merchant = thread_detail.get("merchant")
+            if merchant and isinstance(merchant, dict):
+                 data["merchant"] = merchant.get("merchantName") or merchant.get("name")
+            
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON state: {e}")
+        except Exception as e:
+            logger.error(f"Error parsing detail page: {e}")
+        
+        return data
+
+    def parse_hot_page(self, html_content: str) -> List[Dict[str, Any]]:
+        """
+        Parses the 'Las más hot' page. Currently reuses parse_deals as the structure is similar.
+        """
+        return self.parse_deals(html_content)
+

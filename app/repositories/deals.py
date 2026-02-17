@@ -4,7 +4,7 @@ from sqlalchemy import select, update, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
-from app.models.deals import Deal, DealHistory
+from app.models.deals import Deal, DealHistory, DealOutcome
 from app.models.system_config import SystemConfig
 
 logger = logging.getLogger(__name__)
@@ -265,3 +265,70 @@ class DealsRepository:
         except Exception as e:
             logger.error(f"Error bulk updating system config: {e}")
             raise
+            raise
+
+    async def get_by_url(self, url: str) -> Optional[Deal]:
+        """Retrieves a Deal by its URL."""
+        try:
+            stmt = select(Deal).where(Deal.url == url)
+            result = await self.session.execute(stmt)
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting deal by url {url}: {e}")
+            return None
+
+    async def get_outcome(self, deal_id: int) -> Optional[DealOutcome]:
+        """Retrieves the DealOutcome for a given deal_id."""
+        try:
+            stmt = select(DealOutcome).where(DealOutcome.deal_id == deal_id)
+            result = await self.session.execute(stmt)
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting outcome for deal {deal_id}: {e}")
+            return None
+
+    async def get_training_dataset(self, checkpoint_mins: int = 30) -> List[Dict[str, Any]]:
+        """
+        Fetches a dataset for training/validation.
+        Features: derived from DealHistory at approx 'checkpoint_mins' after posting.
+        Labels: derived from DealOutcome (final_max_temp, reached_X).
+        """
+        try:
+            # We want the snapshot closest to checkpoint_mins, but not BEFORE it (to avoid lookahead bias? 
+            # actually we want the state AT that time). 
+            # Let's simple pick the first history record where hours_since_posted * 60 >= checkpoint_mins
+            
+            query = text("""
+                WITH TargetSnapshots AS (
+                    SELECT DISTINCT ON (dh.deal_id) 
+                        dh.deal_id,
+                        dh.temperature as temp_at_checkpoint,
+                        dh.velocity as velocity_at_checkpoint,
+                        dh.viral_score as score_at_checkpoint,
+                        dh.hours_since_posted
+                    FROM deal_history dh
+                    WHERE dh.hours_since_posted * 60 >= :mins
+                    ORDER BY dh.deal_id, dh.hours_since_posted ASC
+                )
+                SELECT 
+                    ts.deal_id,
+                    ts.temp_at_checkpoint,
+                    ts.velocity_at_checkpoint,
+                    ts.score_at_checkpoint,
+                    doc.final_max_temp,
+                    doc.reached_500,
+                    extract(ISODOW from d.created_at) as dow,
+                    extract(HOUR from d.created_at) as hour_of_day
+                FROM TargetSnapshots ts
+                JOIN deal_outcomes doc ON doc.deal_id = ts.deal_id
+                JOIN deals d ON d.id = ts.deal_id
+                WHERE doc.final_max_temp > 0;
+            """)
+            
+            result = await self.session.execute(query, {"mins": checkpoint_mins})
+            rows = result.mappings().all()
+            return [dict(row) for row in rows]
+            
+        except Exception as e:
+            logger.error(f"Error fetching training dataset: {e}")
+            return []

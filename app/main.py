@@ -21,6 +21,7 @@ from app.services.scraper import ScraperService
 from app.services.analyzer import AnalyzerService
 from app.services.optimizer import AutoTunerService
 from app.services.deals import DealsService
+from app.services.scheduler import SchedulerService
 from app.dependencies import get_subscribers_repo, get_telegram_service
 
 # Initialize logging
@@ -48,6 +49,28 @@ async def init_db_content():
             # 0. Schema Migrations (idempotent)
             logger.info("Running schema migrations...")
             await session.execute(text("ALTER TABLE deal_history ADD COLUMN IF NOT EXISTS viral_score FLOAT DEFAULT 0.0;"))
+            
+            # New columns for standard Deal tracking
+            try:
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1;"))
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_tracked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;"))
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS activity_status TEXT DEFAULT 'active';"))
+            except Exception as e:
+                logger.warning(f"Migration warning (columns might exist): {e}")
+
+            # New table deal_outcomes
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS deal_outcomes (
+                    id SERIAL PRIMARY KEY,
+                    deal_id INTEGER NOT NULL UNIQUE REFERENCES deals(id),
+                    final_max_temp FLOAT DEFAULT 0.0,
+                    reached_200 INTEGER DEFAULT 0,
+                    reached_500 INTEGER DEFAULT 0,
+                    reached_1000 INTEGER DEFAULT 0,
+                    time_to_200_mins FLOAT,
+                    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
             
             # 1. Create Indexes (idempotent)
             logger.info("Verifying indexes...")
@@ -105,118 +128,6 @@ async def run_migration():
         except Exception as e:
             logger.error(f"Error durante migración: {e}")
 
-async def scraper_loop(scraper_service: ScraperService, telegram_service: TelegramService):
-    logger.info("Starting scraper loop...")
-    iteration_count = 0
-    consecutive_failures = 0
-    max_consecutive_failures = 3
-    
-    # Run optimizer once on startup
-    try:
-        async with async_session_factory() as session:
-            deals_repo = DealsRepository(session)
-            optimizer = AutoTunerService(deals_repo)
-            await optimizer.optimize()
-            await session.commit() # Ensure commit if needed by AutoTuner (it handles its own commits now, but good practice)
-    except Exception as e:
-        logger.error(f"Startup optimizer failed: {e}")
-
-    # Initial Analyzer config
-    analyzer = AnalyzerService({})
-    try:
-        async with async_session_factory() as session:
-             deals_repo = DealsRepository(session)
-             initial_config = await deals_repo.get_system_config()
-             analyzer.update_config(initial_config)
-    except Exception as e:
-        logger.error(f"Error loading initial config: {e}")
-
-    while not shutdown_event.is_set():
-        iteration_count += 1
-        logger.info(f"=== Iteration #{iteration_count} ===")
-        
-        # New session for each iteration to ensure fresh state and prevent long-lived internal transaction state
-        async with async_session_factory() as session:
-            deals_repo = DealsRepository(session)
-            sub_repo = SubscribersRepository(session)
-            
-            # Reload config every ~6 iterations
-            if iteration_count % 6 == 0:
-                new_config = await deals_repo.get_system_config()
-                analyzer.update_config(new_config)
-
-            # --- Hunter Mode ---
-            html = await scraper_service.fetch_page("https://www.promodescuentos.com/nuevas")
-            
-            if html:
-                consecutive_failures = 0
-                deals = await asyncio.to_thread(scraper_service.parse_deals, html)
-                
-                # 1. Fetch previous snapshots for acceleration detection (batch)
-                deal_urls = [d.get("url") for d in deals if d.get("url")]
-                prev_snapshots = await deals_repo.get_latest_snapshots_batch(deal_urls)
-
-                # 2. Analyze all deals first, then harvest + notify hot ones
-                new_deals_count = 0
-                for deal in deals:
-                    url = deal.get("url")
-                    if not url:
-                        continue
-                    
-                    # Full viral analysis with acceleration
-                    prev_snapshot = prev_snapshots.get(url)
-                    analysis = analyzer.analyze_deal(deal, prev_snapshot)
-                    viral_score = analysis["final_score"]
-
-                    # Atomic "Unit of Work" save (with viral_score)
-                    deals_service = DealsService(deals_repo)
-                    await deals_service.process_new_deal(deal, viral_score=viral_score)
-
-                    # Hot deal detection
-                    if analysis["is_hot"]:
-                        curr_rating = analysis["rating"]
-                        max_rating = await deals_repo.get_max_rating(url)
-                        
-                        if curr_rating > max_rating:
-                            deal['rating'] = curr_rating
-                            logger.info(
-                                f"🔥 VIRAL DEAL: {deal.get('title')} "
-                                f"({'🔥' * curr_rating} score={viral_score:.1f} "
-                                f"accel={analysis['acceleration']:.2f} "
-                                f"traffic={analysis['traffic_mult']:.1f})"
-                            )
-                            
-                            subs = await sub_repo.get_all()
-                            admins = settings.ADMIN_CHAT_IDS
-                            targets = set(subs)
-                            if admins: targets.update(admins)
-
-                            # 1. Update DB FIRST (Persistence)
-                            await deals_repo.update_max_rating(url, curr_rating)
-                            await session.commit()
-                            new_deals_count += 1
-
-                            # 2. Fire & Forget Notifications (Parallel)
-                            await telegram_service.send_bulk_notifications(targets, deal)
-                
-                logger.info(f"Found {new_deals_count} new/upgraded viral deals.")
-
-            else:
-                consecutive_failures += 1
-                logger.warning(f"Failed to fetch deals. Failures: {consecutive_failures}")
-            
-            if consecutive_failures >= max_consecutive_failures:
-                logger.error("Max failures reached. Exiting loop.")
-                break
-
-        # Wait
-        if not shutdown_event.is_set():
-            wait_time = random.randint(300, 720)
-            logger.info(f"Sleeping for {wait_time}s...")
-            try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=wait_time)
-            except asyncio.TimeoutError:
-                pass # Timeout reached, continue loop
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -226,10 +137,12 @@ async def lifespan(app: FastAPI):
     # Initialize services
     scraper_service = ScraperService()
     telegram_service = TelegramService()
+    scheduler_service = SchedulerService(scraper_service, telegram_service)
     
     # Attach to app state for dependency injection
     app.state.scraper_service = scraper_service
     app.state.telegram_service = telegram_service
+    app.state.scheduler_service = scheduler_service
     
     # Create tables
     async with engine.begin() as conn:
@@ -240,20 +153,16 @@ async def lifespan(app: FastAPI):
     await setup_webhook()
     await scraper_service.startup()
 
-    # Pass services explicitly to the background loop
-    loop_task = asyncio.create_task(scraper_loop(scraper_service, telegram_service))
+    # Start Scheduler (which launches background tasks)
+    await scheduler_service.start()
 
     yield
     
     # Shutdown
     logger.info("Shutting down services...")
-    shutdown_event.set()
-    loop_task.cancel()
-    try:
-        await loop_task
-    except asyncio.CancelledError:
-        pass
-        
+    shutdown_event.set() # Redundant if using scheduler.stop() but harmless
+    
+    await scheduler_service.stop()
     await telegram_service.close()
     await scraper_service.close()
     await engine.dispose()

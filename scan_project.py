@@ -62,7 +62,8 @@ EXTRA_IGNORE_PATTERNS: List[str] = [
     "extraction.json",
     "extraction_20260120.json",
     "xml_inputs/",
-    "deals_history.csv"
+    "deals_history.csv",
+    "README.md"
 ]
 
 # ----------------------------- .gitignore helpers -----------------------------
