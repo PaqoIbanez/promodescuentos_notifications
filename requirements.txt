@@ -1,4 +1,14 @@
 beautifulsoup4
 python-dotenv
 requests
-psycopg2-binary
+pydantic
+pydantic-settings
+fastapi
+uvicorn
+httpx
+asyncpg
+sqlalchemy
+pydantic-settings
+fastapi
+uvicorn
+httpx

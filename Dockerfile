@@ -1,31 +1,56 @@
-FROM python:3.11-slim
+# Build stage
+FROM python:3.11-slim AS builder
 
-# Install minimal system dependencies (if any are needed for requests/bs4, usually none for slim)
-# requests and bs4 on python-slim usually work out of the box or might need gcc for some wheels, but pure python usually fine.
-# We'll keep apt-get update just in case we need to add something later, but remove the heavy stuff.
-RUN apt-get update && apt-get install -y \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Chrome installation removed
-
-# Configurar el directorio de trabajo
 WORKDIR /app
 
-# Crear directorio para logs y archivos de depuración
-RUN mkdir -p /app/debug
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copiar los archivos de requisitos
+# Install python dependencies to a virtual environment or usage --user
+# Here we use --user for simplicity in copying, or install to /install
 COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Instalar dependencias de Python
-RUN pip install --no-cache-dir -r requirements.txt
+# Runner stage
+FROM python:3.11-slim AS runner
 
-# Copiar el código fuente
+WORKDIR /app
+
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
+
+# Install runtime dependencies (libpq for psycopg2) & curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed python packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application code
 COPY . .
 
-# Exponer el puerto para el health check
-EXPOSE 10000
+# Set ownership to appuser
+RUN chown -R appuser:appuser /app
 
-# Comando para ejecutar la aplicación
-CMD ["python", "scrape_promodescuentos.py"] 
+# Switch to non-root user
+USER appuser
+
+# Expose port (default 10000)
+ENV PORT=10000
+EXPOSE $PORT
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Command to run the application (JSON array format for signal handling)
+CMD ["sh", "-c", "python init_db.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
