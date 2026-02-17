@@ -23,6 +23,7 @@ class DealHistory(Base):
     deal_id = Column(Integer, ForeignKey("deals.id"), nullable=False)
     temperature = Column(Float)
     velocity = Column(Float)
+    viral_score = Column(Float, default=0.0)
     hours_since_posted = Column(Float)
     source = Column(String)
     recorded_at = Column(DateTime(timezone=True), server_default=func.now())

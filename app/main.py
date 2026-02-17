@@ -45,6 +45,10 @@ async def init_db_content():
     """Initializes database with default config and indexes."""
     try:
         async with async_session_factory() as session:
+            # 0. Schema Migrations (idempotent)
+            logger.info("Running schema migrations...")
+            await session.execute(text("ALTER TABLE deal_history ADD COLUMN IF NOT EXISTS viral_score FLOAT DEFAULT 0.0;"))
+            
             # 1. Create Indexes (idempotent)
             logger.info("Verifying indexes...")
             await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deal_history_deal_hours ON deal_history(deal_id, hours_since_posted);"))
@@ -54,10 +58,18 @@ async def init_db_content():
             # 2. Seed Default Config
             logger.info("Seeding default configuration...")
             defaults = [
+                # Legacy velocity thresholds
                 ('velocity_instant_kill', '4.0'),
                 ('velocity_fast_rising', '3.0'),
                 ('min_temp_instant_kill', '15'),
-                ('min_temp_fast_rising', '30')
+                ('min_temp_fast_rising', '30'),
+                # Advanced Scoring Engine
+                ('viral_threshold', '50.0'),
+                ('min_seed_temp', '15.0'),
+                ('gravity', '1.2'),
+                ('score_tier_4', '500.0'),
+                ('score_tier_3', '200.0'),
+                ('score_tier_2', '100.0'),
             ]
             for key, val in defaults:
                 await session.execute(
@@ -140,27 +152,39 @@ async def scraper_loop(scraper_service: ScraperService, telegram_service: Telegr
                 consecutive_failures = 0
                 deals = await asyncio.to_thread(scraper_service.parse_deals, html)
                 
-                # 1. Harvest
-                for deal in deals:
-                    if not deal.get("url"): continue
-                    
-                    # Atomic "Unit of Work" save
-                    deals_service = DealsService(deals_repo)
-                    await deals_service.process_new_deal(deal)
+                # 1. Fetch previous snapshots for acceleration detection (batch)
+                deal_urls = [d.get("url") for d in deals if d.get("url")]
+                prev_snapshots = await deals_repo.get_latest_snapshots_batch(deal_urls)
 
-                # 2. Analyze & Notify
+                # 2. Analyze all deals first, then harvest + notify hot ones
                 new_deals_count = 0
                 for deal in deals:
-                    if analyzer.is_deal_hot(deal):
-                        url = deal.get("url")
-                        if not url: continue
-                        
-                        curr_rating = analyzer.calculate_rating(deal)
+                    url = deal.get("url")
+                    if not url:
+                        continue
+                    
+                    # Full viral analysis with acceleration
+                    prev_snapshot = prev_snapshots.get(url)
+                    analysis = analyzer.analyze_deal(deal, prev_snapshot)
+                    viral_score = analysis["final_score"]
+
+                    # Atomic "Unit of Work" save (with viral_score)
+                    deals_service = DealsService(deals_repo)
+                    await deals_service.process_new_deal(deal, viral_score=viral_score)
+
+                    # Hot deal detection
+                    if analysis["is_hot"]:
+                        curr_rating = analysis["rating"]
                         max_rating = await deals_repo.get_max_rating(url)
                         
                         if curr_rating > max_rating:
                             deal['rating'] = curr_rating
-                            logger.info(f"🔥 HOT DEAL: {deal.get('title')} ({curr_rating} flames)")
+                            logger.info(
+                                f"🔥 VIRAL DEAL: {deal.get('title')} "
+                                f"({'🔥' * curr_rating} score={viral_score:.1f} "
+                                f"accel={analysis['acceleration']:.2f} "
+                                f"traffic={analysis['traffic_mult']:.1f})"
+                            )
                             
                             subs = await sub_repo.get_all()
                             admins = settings.ADMIN_CHAT_IDS
@@ -173,11 +197,9 @@ async def scraper_loop(scraper_service: ScraperService, telegram_service: Telegr
                             new_deals_count += 1
 
                             # 2. Fire & Forget Notifications (Parallel)
-                            # We await it here to not block the loop logic too much, 
-                            # but it's much faster now due to concurrency.
                             await telegram_service.send_bulk_notifications(targets, deal)
                 
-                logger.info(f"Found {new_deals_count} new/upgraded hot deals.")
+                logger.info(f"Found {new_deals_count} new/upgraded viral deals.")
 
             else:
                 consecutive_failures += 1
