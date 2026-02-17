@@ -631,7 +631,40 @@ def scrape_promodescuentos_hot() -> str:
          except Exception as save_err:
               logging.error(f"Fallo crítico al intentar guardar HTML en {save_path}: {save_err}")
 
+
     return html_to_save
+
+
+def scrape_promodescuentos_historian() -> str:
+    """
+    Extrae el HTML de la página '/las-mas-hot' para análisis histórico.
+    Usa el mismo mecanismo de requests + headers que la función principal.
+    """
+    url = "https://www.promodescuentos.com/las-mas-hot"
+    html_content = ""
+    
+    # Headers estándar
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+    try:
+        logging.info(f"Accediendo a la URL: {url} con requests (Historian)...")
+        response = requests.get(url, headers=headers, timeout=20)
+
+        if response.status_code == 200:
+            html_content = response.text
+            logging.info(f"HTML Historian obtenido (longitud: {len(html_content)} caracteres).")
+        else:
+            logging.error(f"Error scraping Historian: Status Code {response.status_code}")
+
+    except Exception as e:
+        logging.error(f"Error inesperado en scrape_promodescuentos_historian: {e}")
+
+    return html_content
+
 
 
 def parse_deals(soup: BeautifulSoup) -> List[Dict[str, Any]]:
