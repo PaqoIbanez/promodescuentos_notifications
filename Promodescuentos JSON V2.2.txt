@@ -1,0 +1,3981 @@
+//////////////////////////////////////
+///////****** Promodescuentos JSON V2.2 ******///////
+//////////////////////////////////////
+
+////////  Tecnología no detectada  ////////
+(Lenguajes: Python, Text, YAML)
+
+ÍNDICE DE ARCHIVOS INCLUIDOS:
+ - .env.template
+ - analyze_history.py
+ - Dockerfile
+ - promodescuentos_notifications.txt
+ - render.yaml
+ - requirements.txt
+ - app/dependencies.py
+ - app/main.py
+ - app/core/config.py
+ - app/core/logging_config.py
+ - app/db/session.py
+ - app/models/base.py
+ - app/models/deals.py
+ - app/models/subscribers.py
+ - app/models/system_config.py
+ - app/repositories/deals.py
+ - app/repositories/subscribers.py
+ - app/services/analyzer.py
+ - app/services/deals.py
+ - app/services/optimizer.py
+ - app/services/scheduler.py
+ - app/services/scraper.py
+ - app/services/telegram.py
+ - scripts/init_db.py
+
+================================================================================
+
+// .env.template
+
+# Configuración necesaria para Promodescuentos Scraper
+DATABASE_URL=postgresql://usuario:password@localhost:5432/nombre_bd
+TELEGRAM_BOT_TOKEN=tu_bot_token_aqui
+ADMIN_CHAT_IDS=tu_chat_id_aqui
+APP_BASE_URL=http://localhost:10000
+DEBUG=True
+
+
+--------------------------------------------------------------------------------
+
+# analyze_history.py
+
+
+import csv
+import statistics
+from datetime import datetime
+from collections import defaultdict
+
+HISTORY_FILE = "deals_history.csv"
+
+def analyze_history():
+    print(f"--- Analizando {HISTORY_FILE} ---")
+    
+    deals_by_url = defaultdict(list)
+    
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                deals_by_url[row["url"]].append(row)
+    except FileNotFoundError:
+        print("Archivo no encontrado.")
+        return
+
+    print(f"Total de ofertas únicas rastreadas: {len(deals_by_url)}")
+
+    # Categorías de éxito
+    winners_100 = [] # Llegaron a > 100°
+    winners_200 = [] # Llegaron a > 200°
+    losers = []      # Nunca pasaron de 50° y tienen al menos 1 hora de datos o > 5 horas de antigüedad
+
+    # Métricas para análisis temprano (0-15 min, 15-30 min)
+    early_stats = {
+        "winners_100": {"vel_15m": [], "vel_30m": []},
+        "winners_200": {"vel_15m": [], "vel_30m": []},
+        "losers":      {"vel_15m": [], "vel_30m": []}
+    }
+
+    for url, history in deals_by_url.items():
+        # Calcular max temperatura alcanzada
+        temps = [float(h["temperature"]) for h in history]
+        max_temp = max(temps)
+        min_hours = min([float(h["hours_since_posted"]) for h in history])
+        max_hours = max([float(h["hours_since_posted"]) for h in history])
+        
+        category = None
+        if max_temp >= 200:
+            category = "winners_200"
+            winners_200.append(url)
+        elif max_temp >= 100:
+            category = "winners_100"
+            winners_100.append(url)
+        elif max_temp < 50 and max_hours > 5.0: # Solo considerar losers confirmados (viejos y fríos)
+             category = "losers"
+             losers.append(url)
+        
+        if category:
+            # Analizar puntos tempranos
+            for h in history:
+                hours = float(h["hours_since_posted"])
+                velocity = float(h["velocity"])
+                
+                if hours <= 0.25: # 0-15 min
+                    early_stats[category]["vel_15m"].append(velocity)
+                if hours <= 0.50: # 0-30 min
+                    early_stats[category]["vel_30m"].append(velocity)
+
+    print(f"\n--- Resultados ---")
+    print(f"Super Winners (>200°): {len(winners_200)}")
+    print(f"Winners (>100°): {len(winners_100)}")
+    print(f"Losers (<50° tras 5h): {len(losers)}")
+
+    def print_stats(label, data):
+        if not data:
+            print(f"{label}: Sin datos suficientes.")
+            return
+        avg = statistics.mean(data)
+        median = statistics.median(data)
+        try:
+            p90 = statistics.quantiles(data, n=10)[0] # 10th percentile (lo más bajo de los top) - error en python < 3.8, usar sorted
+            p10 = sorted(data)[int(len(data)*0.1)]
+        except:
+             p10 = min(data)
+
+        print(f"{label:<35} | Media: {avg:.4f} | Mediana: {median:.4f} | Min (Top 10%): {p10:.4f}")
+
+    print("\n--- Velocidad en los primeros 15 minutos (< 0.25h) ---")
+    print_stats("Winners > 200° (Super Hot)", early_stats["winners_200"]["vel_15m"])
+    print_stats("Winners > 100° (Hot)", early_stats["winners_100"]["vel_15m"])
+    print_stats("Losers (Cold)", early_stats["losers"]["vel_15m"])
+
+    print("\n--- Velocidad en los primeros 30 minutos (< 0.50h) ---")
+    print_stats("Winners > 200° (Super Hot)", early_stats["winners_200"]["vel_30m"])
+    print_stats("Winners > 100° (Hot)", early_stats["winners_100"]["vel_30m"])
+    print_stats("Losers (Cold)", early_stats["losers"]["vel_30m"])
+
+    # Recomendación
+    print("\n--- Recomendación para Umbrales ---")
+    
+    # Threshold sug. 15m
+    w200_15m = early_stats["winners_200"]["vel_15m"]
+    w100_15m = early_stats["winners_100"]["vel_15m"]
+    l_15m = early_stats["losers"]["vel_15m"]
+
+    if w200_15m:
+        rec_15m = sorted(w200_15m)[int(len(w200_15m)*0.2)] # 20th percentile
+        print(f"Umbral sugerido < 15min (Instant Kill): {rec_15m:.2f}°/min (Capturaría al 80% de las ofertas > 200°)")
+    
+    # Threshold sug. 30m
+    w100_30m = early_stats["winners_100"]["vel_30m"]
+    if w100_30m:
+        rec_30m = sorted(w100_30m)[int(len(w100_30m)*0.2)] # 20th percentile
+        print(f"Umbral sugerido < 30min (Fast Rising): {rec_30m:.2f}°/min (Capturaría al 80% de las ofertas > 100°)")
+
+if __name__ == "__main__":
+    analyze_history()
+
+
+--------------------------------------------------------------------------------
+
+// Dockerfile
+
+# Build stage
+FROM python:3.11-slim AS builder
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies to a virtual environment or usage --user
+# Here we use --user for simplicity in copying, or install to /install
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Runner stage
+FROM python:3.11-slim AS runner
+
+WORKDIR /app
+
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
+
+# Install runtime dependencies (libpq for psycopg2) & curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed python packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application code
+COPY . .
+
+# Set ownership to appuser
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port (default 10000)
+ENV PORT=10000
+EXPOSE $PORT
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Command to run the application (JSON array format for signal handling)
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+
+
+--------------------------------------------------------------------------------
+
+** promodescuentos_notifications.txt **
+
+///////////////////////////////////////////////
+///////****** promodescuentos_notifications ******///////
+///////////////////////////////////////////////
+
+////////  Tecnología no detectada  ////////
+(Lenguajes: Python, Text, YAML)
+
+ÍNDICE DE ARCHIVOS INCLUIDOS:
+ - render.yaml
+ - requirements.txt
+ - Dockerfile
+ - analyze_history.py
+ - app/main.py
+ - app/dependencies.py
+ - app/core/config.py
+ - app/core/logging_config.py
+ - app/repositories/deals.py
+ - app/repositories/subscribers.py
+ - app/models/deals.py
+ - app/models/system_config.py
+ - app/models/subscribers.py
+ - app/models/base.py
+ - app/db/session.py
+ - app/services/scraper.py
+ - app/services/deals.py
+ - app/services/telegram.py
+ - app/services/analyzer.py
+ - app/services/optimizer.py
+
+================================================================================
+
+# render.yaml
+
+services:
+  - type: web # Tipo de servicio (puede ser 'worker' si no necesitas exponer HTTP públicamente, pero 'web' está bien para el health check)
+    name: promodescuentos-scraper # Nombre del servicio en Render
+    env: docker # Indica que usaremos Docker
+    # dockerfilePath: ./Dockerfile # Descomentar si tu Dockerfile no está en la raíz
+    # dockerContext: .          # Descomentar si el contexto no es la raíz
+    healthCheckPath: / # Ruta para el health check (que tu servidor HTTP ya expone)
+    plan: free # O el plan que estés usando (e.g., starter) - ¡OJO! Planes gratuitos pueden ser lentos para Selenium.
+    # IMPORTANTE: Comando para iniciar tu aplicación dentro del contenedor
+    startCommand: python scrape_promodescuentos.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Marca como secreto en Render
+      - key: TELEGRAM_CHAT_ID
+        sync: false # Marca como secreto en Render
+      - key: PYTHONUNBUFFERED # Recomendado para logs en Docker
+        value: "1"
+      - key: PYTHONIOENCODING # Asegura UTF-8 para logs
+        value: "UTF-8"
+
+
+--------------------------------------------------------------------------------
+
+** requirements.txt **
+
+beautifulsoup4
+python-dotenv
+requests
+pydantic
+pydantic-settings
+fastapi
+uvicorn
+httpx
+asyncpg
+sqlalchemy
+pydantic-settings
+fastapi
+uvicorn
+httpx
+
+
+--------------------------------------------------------------------------------
+
+// Dockerfile
+
+# Build stage
+FROM python:3.11-slim AS builder
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python dependencies to a virtual environment or usage --user
+# Here we use --user for simplicity in copying, or install to /install
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Runner stage
+FROM python:3.11-slim AS runner
+
+WORKDIR /app
+
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
+
+# Install runtime dependencies (libpq for psycopg2) & curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed python packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application code
+COPY . .
+
+# Set ownership to appuser
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose port (default 10000)
+ENV PORT=10000
+EXPOSE $PORT
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:$PORT/health || exit 1
+
+# Command to run the application (JSON array format for signal handling)
+CMD ["sh", "-c", "python init_db.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+
+
+--------------------------------------------------------------------------------
+
+# analyze_history.py
+
+
+import csv
+import statistics
+from datetime import datetime
+from collections import defaultdict
+
+HISTORY_FILE = "deals_history.csv"
+
+def analyze_history():
+    print(f"--- Analizando {HISTORY_FILE} ---")
+    
+    deals_by_url = defaultdict(list)
+    
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                deals_by_url[row["url"]].append(row)
+    except FileNotFoundError:
+        print("Archivo no encontrado.")
+        return
+
+    print(f"Total de ofertas únicas rastreadas: {len(deals_by_url)}")
+
+    # Categorías de éxito
+    winners_100 = [] # Llegaron a > 100°
+    winners_200 = [] # Llegaron a > 200°
+    losers = []      # Nunca pasaron de 50° y tienen al menos 1 hora de datos o > 5 horas de antigüedad
+
+    # Métricas para análisis temprano (0-15 min, 15-30 min)
+    early_stats = {
+        "winners_100": {"vel_15m": [], "vel_30m": []},
+        "winners_200": {"vel_15m": [], "vel_30m": []},
+        "losers":      {"vel_15m": [], "vel_30m": []}
+    }
+
+    for url, history in deals_by_url.items():
+        # Calcular max temperatura alcanzada
+        temps = [float(h["temperature"]) for h in history]
+        max_temp = max(temps)
+        min_hours = min([float(h["hours_since_posted"]) for h in history])
+        max_hours = max([float(h["hours_since_posted"]) for h in history])
+        
+        category = None
+        if max_temp >= 200:
+            category = "winners_200"
+            winners_200.append(url)
+        elif max_temp >= 100:
+            category = "winners_100"
+            winners_100.append(url)
+        elif max_temp < 50 and max_hours > 5.0: # Solo considerar losers confirmados (viejos y fríos)
+             category = "losers"
+             losers.append(url)
+        
+        if category:
+            # Analizar puntos tempranos
+            for h in history:
+                hours = float(h["hours_since_posted"])
+                velocity = float(h["velocity"])
+                
+                if hours <= 0.25: # 0-15 min
+                    early_stats[category]["vel_15m"].append(velocity)
+                if hours <= 0.50: # 0-30 min
+                    early_stats[category]["vel_30m"].append(velocity)
+
+    print(f"\n--- Resultados ---")
+    print(f"Super Winners (>200°): {len(winners_200)}")
+    print(f"Winners (>100°): {len(winners_100)}")
+    print(f"Losers (<50° tras 5h): {len(losers)}")
+
+    def print_stats(label, data):
+        if not data:
+            print(f"{label}: Sin datos suficientes.")
+            return
+        avg = statistics.mean(data)
+        median = statistics.median(data)
+        try:
+            p90 = statistics.quantiles(data, n=10)[0] # 10th percentile (lo más bajo de los top) - error en python < 3.8, usar sorted
+            p10 = sorted(data)[int(len(data)*0.1)]
+        except:
+             p10 = min(data)
+
+        print(f"{label:<35} | Media: {avg:.4f} | Mediana: {median:.4f} | Min (Top 10%): {p10:.4f}")
+
+    print("\n--- Velocidad en los primeros 15 minutos (< 0.25h) ---")
+    print_stats("Winners > 200° (Super Hot)", early_stats["winners_200"]["vel_15m"])
+    print_stats("Winners > 100° (Hot)", early_stats["winners_100"]["vel_15m"])
+    print_stats("Losers (Cold)", early_stats["losers"]["vel_15m"])
+
+    print("\n--- Velocidad en los primeros 30 minutos (< 0.50h) ---")
+    print_stats("Winners > 200° (Super Hot)", early_stats["winners_200"]["vel_30m"])
+    print_stats("Winners > 100° (Hot)", early_stats["winners_100"]["vel_30m"])
+    print_stats("Losers (Cold)", early_stats["losers"]["vel_30m"])
+
+    # Recomendación
+    print("\n--- Recomendación para Umbrales ---")
+    
+    # Threshold sug. 15m
+    w200_15m = early_stats["winners_200"]["vel_15m"]
+    w100_15m = early_stats["winners_100"]["vel_15m"]
+    l_15m = early_stats["losers"]["vel_15m"]
+
+    if w200_15m:
+        rec_15m = sorted(w200_15m)[int(len(w200_15m)*0.2)] # 20th percentile
+        print(f"Umbral sugerido < 15min (Instant Kill): {rec_15m:.2f}°/min (Capturaría al 80% de las ofertas > 200°)")
+    
+    # Threshold sug. 30m
+    w100_30m = early_stats["winners_100"]["vel_30m"]
+    if w100_30m:
+        rec_30m = sorted(w100_30m)[int(len(w100_30m)*0.2)] # 20th percentile
+        print(f"Umbral sugerido < 30min (Fast Rising): {rec_30m:.2f}°/min (Capturaría al 80% de las ofertas > 100°)")
+
+if __name__ == "__main__":
+    analyze_history()
+
+
+--------------------------------------------------------------------------------
+
+# app/main.py
+
+import logging
+import asyncio
+import os
+import json
+import random
+import httpx
+from contextlib import asynccontextmanager
+from typing import Dict, Any, Set
+from fastapi import FastAPI, Request, HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+from app.core.config import settings
+from app.core.logging_config import setup_logging
+from app.db.session import engine, async_session_factory, get_db
+from app.models.base import Base
+from app.repositories.subscribers import SubscribersRepository
+from app.repositories.deals import DealsRepository
+from app.services.telegram import TelegramService
+from app.services.scraper import ScraperService
+from app.services.analyzer import AnalyzerService
+from app.services.optimizer import AutoTunerService
+from app.services.deals import DealsService
+from app.dependencies import get_subscribers_repo, get_telegram_service
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
+
+# Global state
+shutdown_event = asyncio.Event()
+
+async def setup_webhook():
+    if settings.APP_BASE_URL and settings.TELEGRAM_BOT_TOKEN:
+        webhook_url = f"{settings.APP_BASE_URL.rstrip('/')}/webhook/{settings.TELEGRAM_BOT_TOKEN}"
+        try:
+            url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook"
+            async with httpx.AsyncClient() as client:
+                await client.post(url, params={"url": webhook_url}, timeout=10.0)
+            logger.info(f"Webhook set to {webhook_url}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+
+async def init_db_content():
+    """Initializes database with default config and indexes."""
+    try:
+        async with async_session_factory() as session:
+            # 1. Create Indexes (idempotent)
+            logger.info("Verifying indexes...")
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deal_history_deal_hours ON deal_history(deal_id, hours_since_posted);"))
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deals_url ON deals(url);"))
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deals_created ON deals(created_at);"))
+            
+            # 2. Seed Default Config
+            logger.info("Seeding default configuration...")
+            defaults = [
+                ('velocity_instant_kill', '4.0'),
+                ('velocity_fast_rising', '3.0'),
+                ('min_temp_instant_kill', '15'),
+                ('min_temp_fast_rising', '30')
+            ]
+            for key, val in defaults:
+                await session.execute(
+                    text("INSERT INTO system_config (key, value) VALUES (:key, :val) ON CONFLICT (key) DO NOTHING"),
+                    {"key": key, "val": val}
+                )
+            await session.commit()
+            logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+
+async def run_migration():
+    """Migrates subscribers.json to PostgreSQL if it exists."""
+    json_path = "subscribers.json"
+    if os.path.exists(json_path):
+        logger.info(f"Detectado archivo legado {json_path}. Iniciando migración...")
+        try:
+            async with async_session_factory() as session:
+                sub_repo = SubscribersRepository(session)
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        count = 0
+                        for chat_id in data:
+                            if await sub_repo.add(str(chat_id)):
+                                count += 1
+                        logger.info(f"Migrados {count} suscriptores a la BD.")
+                    else:
+                        logger.warning("Formato de subscribers.json inválido (no es lista).")
+                
+                os.rename(json_path, json_path + ".bak")
+                logger.info(f"Archivo {json_path} renombrado a .bak")
+        except Exception as e:
+            logger.error(f"Error durante migración: {e}")
+
+async def scraper_loop(scraper_service: ScraperService, telegram_service: TelegramService):
+    logger.info("Starting scraper loop...")
+    iteration_count = 0
+    consecutive_failures = 0
+    max_consecutive_failures = 3
+    
+    # Run optimizer once on startup
+    try:
+        async with async_session_factory() as session:
+            deals_repo = DealsRepository(session)
+            optimizer = AutoTunerService(deals_repo)
+            await optimizer.optimize()
+            await session.commit() # Ensure commit if needed by AutoTuner (it handles its own commits now, but good practice)
+    except Exception as e:
+        logger.error(f"Startup optimizer failed: {e}")
+
+    # Initial Analyzer config
+    analyzer = AnalyzerService({})
+    try:
+        async with async_session_factory() as session:
+             deals_repo = DealsRepository(session)
+             initial_config = await deals_repo.get_system_config()
+             analyzer.update_config(initial_config)
+    except Exception as e:
+        logger.error(f"Error loading initial config: {e}")
+
+    while not shutdown_event.is_set():
+        iteration_count += 1
+        logger.info(f"=== Iteration #{iteration_count} ===")
+        
+        # New session for each iteration to ensure fresh state and prevent long-lived internal transaction state
+        async with async_session_factory() as session:
+            deals_repo = DealsRepository(session)
+            sub_repo = SubscribersRepository(session)
+            
+            # Reload config every ~6 iterations
+            if iteration_count % 6 == 0:
+                new_config = await deals_repo.get_system_config()
+                analyzer.update_config(new_config)
+
+            # --- Hunter Mode ---
+            html = await scraper_service.fetch_page("https://www.promodescuentos.com/nuevas")
+            
+            if html:
+                consecutive_failures = 0
+                deals = await asyncio.to_thread(scraper_service.parse_deals, html)
+                
+                # 1. Harvest
+                for deal in deals:
+                    if not deal.get("url"): continue
+                    
+                    # Atomic "Unit of Work" save
+                    deals_service = DealsService(deals_repo)
+                    await deals_service.process_new_deal(deal)
+
+                # 2. Analyze & Notify
+                new_deals_count = 0
+                for deal in deals:
+                    if analyzer.is_deal_hot(deal):
+                        url = deal.get("url")
+                        if not url: continue
+                        
+                        curr_rating = analyzer.calculate_rating(deal)
+                        max_rating = await deals_repo.get_max_rating(url)
+                        
+                        if curr_rating > max_rating:
+                            deal['rating'] = curr_rating
+                            logger.info(f"🔥 HOT DEAL: {deal.get('title')} ({curr_rating} flames)")
+                            
+                            subs = await sub_repo.get_all()
+                            admins = settings.ADMIN_CHAT_IDS
+                            targets = set(subs)
+                            if admins: targets.update(admins)
+
+                            # 1. Update DB FIRST (Persistence)
+                            await deals_repo.update_max_rating(url, curr_rating)
+                            await session.commit()
+                            new_deals_count += 1
+
+                            # 2. Fire & Forget Notifications (Parallel)
+                            # We await it here to not block the loop logic too much, 
+                            # but it's much faster now due to concurrency.
+                            await telegram_service.send_bulk_notifications(targets, deal)
+                
+                logger.info(f"Found {new_deals_count} new/upgraded hot deals.")
+
+            else:
+                consecutive_failures += 1
+                logger.warning(f"Failed to fetch deals. Failures: {consecutive_failures}")
+            
+            if consecutive_failures >= max_consecutive_failures:
+                logger.error("Max failures reached. Exiting loop.")
+                break
+
+        # Wait
+        if not shutdown_event.is_set():
+            wait_time = random.randint(300, 720)
+            logger.info(f"Sleeping for {wait_time}s...")
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=wait_time)
+            except asyncio.TimeoutError:
+                pass # Timeout reached, continue loop
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Initializing services...")
+    
+    # Initialize services
+    scraper_service = ScraperService()
+    telegram_service = TelegramService()
+    
+    # Attach to app state for dependency injection
+    app.state.scraper_service = scraper_service
+    app.state.telegram_service = telegram_service
+    
+    # Create tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    await run_migration()
+    await init_db_content()
+    await setup_webhook()
+    await scraper_service.startup()
+
+    # Pass services explicitly to the background loop
+    loop_task = asyncio.create_task(scraper_loop(scraper_service, telegram_service))
+
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down services...")
+    shutdown_event.set()
+    loop_task.cancel()
+    try:
+        await loop_task
+    except asyncio.CancelledError:
+        pass
+        
+    await telegram_service.close()
+    await scraper_service.close()
+    await engine.dispose()
+    logger.info("Shutdown complete.")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+async def root():
+    return {"status": "running", "service": "promodescuentos-bot"}
+
+@app.get("/health")
+async def health_check(session: AsyncSession = Depends(get_db)):
+    # Verify DB connection
+    try:
+        await session.execute(text("SELECT 1"))
+        return {"status": "healthy", "db": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Database connectivity failed")
+
+@app.post(f"/webhook/{settings.TELEGRAM_BOT_TOKEN}")
+async def webhook(
+    request: Request, 
+    sub_repo: SubscribersRepository = Depends(get_subscribers_repo),
+    telegram_service: TelegramService = Depends(get_telegram_service)
+):
+    try:
+        update = await request.json()
+        if 'message' in update:
+            msg = update['message']
+            chat_id = str(msg['chat']['id'])
+            text = msg.get('text', '').lower()
+            
+            if text in ['/start', '/subscribe']:
+                if await sub_repo.add(chat_id):
+                    await telegram_service.send_message(chat_id, text="¡Suscrito! 🎉 Recibirás ofertas calientes.")
+                else:
+                    await telegram_service.send_message(chat_id, text="Ya estás suscrito.")
+            elif text in ['/stop', '/unsubscribe']:
+                await sub_repo.remove(chat_id)
+                await telegram_service.send_message(chat_id, text="Suscripción cancelada.")
+            else:
+                 await telegram_service.send_message(chat_id, text="Usa /start para suscribirte o /stop para cancelar.")
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Error")
+
+
+--------------------------------------------------------------------------------
+
+# app/dependencies.py
+
+from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_db
+from app.repositories.subscribers import SubscribersRepository
+from app.repositories.deals import DealsRepository
+from app.services.telegram import TelegramService
+from app.services.scraper import ScraperService
+
+async def get_subscribers_repo(session: AsyncSession = Depends(get_db)) -> SubscribersRepository:
+    return SubscribersRepository(session)
+
+async def get_deals_repo(session: AsyncSession = Depends(get_db)) -> DealsRepository:
+    return DealsRepository(session)
+
+def get_telegram_service(request: Request) -> TelegramService:
+    return request.app.state.telegram_service
+
+def get_scraper_service(request: Request) -> ScraperService:
+    return request.app.state.scraper_service
+
+
+--------------------------------------------------------------------------------
+
+# app/core/config.py
+
+import os
+from typing import Set
+from pydantic import Field, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    """
+    Application settings managed by Pydantic.
+    Reads from environment variables and .env file.
+    """
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    # App
+    APP_BASE_URL: str = Field(default="", description="Base URL of the application")
+    DEBUG: bool = Field(default=False, description="Debug mode")
+    
+    # Database
+    DATABASE_URL: str = Field(..., description="PostgreSQL Database URL")
+
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram Bot Token")
+    ADMIN_CHAT_IDS_STR: str = Field(default="", alias="ADMIN_CHAT_IDS")
+
+    # Scraping Defaults (Dynamic config overrides these from DB)
+    DEFAULT_VELOCITY_INSTANT_KILL: float = 1.7
+    DEFAULT_VELOCITY_FAST_RISING: float = 1.1
+    DEFAULT_MIN_TEMP_INSTANT_KILL: float = 15.0
+    DEFAULT_MIN_TEMP_FAST_RISING: float = 30.0
+
+    # Paths
+    DEBUG_DIR: str = Field(default="debug", description="Directory for debug files")
+    HISTORY_FILE: str = Field(default="deals_history.csv", description="CSV file for storing history (Legacy)")
+
+    @computed_field
+    def ADMIN_CHAT_IDS(self) -> Set[str]:
+        """Parses the comma-separated string of admin IDs into a set."""
+        if not self.ADMIN_CHAT_IDS_STR:
+            return set()
+        return {chat_id.strip() for chat_id in self.ADMIN_CHAT_IDS_STR.split(',') if chat_id.strip()}
+
+settings = Settings()
+
+
+--------------------------------------------------------------------------------
+
+# app/core/logging_config.py
+
+import logging
+import sys
+from app.core.config import settings
+
+def setup_logging():
+    """Confirms logging configuration for the application."""
+    log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+    
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler("app.log", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    # Metter down chatter from requests/urllib3 if needed
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+--------------------------------------------------------------------------------
+
+# app/repositories/deals.py
+
+import logging
+from typing import Dict, Any, Optional, List
+from sqlalchemy import select, update, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert
+
+from app.models.deals import Deal, DealHistory
+from app.models.system_config import SystemConfig
+
+logger = logging.getLogger(__name__)
+
+class DealsRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def save_deal(self, deal_data: Dict[str, Any]) -> Optional[int]:
+        """
+        Saves or updates a deal in the database. Returns the deal ID.
+        Does NOT commit.
+        """
+        try:
+            stmt = insert(Deal).values(
+                url=deal_data.get("url"),
+                title=deal_data.get("title"),
+                merchant=deal_data.get("merchant", ""),
+                image_url=deal_data.get("image_url", ""),
+                # created_at defaults to func.now()
+            ).on_conflict_do_update(
+                index_elements=['url'],
+                set_={
+                    'title': deal_data.get("title"),
+                    'merchant': deal_data.get("merchant", ""),
+                    'image_url': deal_data.get("image_url", "")
+                }
+            ).returning(Deal.id)
+
+            result = await self.session.execute(stmt)
+            # await self.session.commit() # Removed for Unit of Work
+            return result.scalar_one()
+
+        except Exception as e:
+            logger.error(f"Error saving deal {deal_data.get('url')}: {e}")
+            raise # Propagate exception to Service
+
+    async def save_history(self, deal_id: int, deal_data: Dict[str, Any], source: str) -> bool:
+        """
+        Saves a history record for a deal.
+        Does NOT commit.
+        """
+        try:
+            temp = float(deal_data.get("temperature", 0))
+            hours = float(deal_data.get("hours_since_posted", 0))
+            minutes = max(1, hours * 60)
+            velocity = temp / minutes
+
+            new_history = DealHistory(
+                deal_id=deal_id,
+                temperature=temp,
+                velocity=velocity,
+                hours_since_posted=hours,
+                source=source
+            )
+            self.session.add(new_history)
+            # await self.session.commit() # Removed for Unit of Work
+            return True
+        except Exception as e:
+            logger.error(f"Error saving history for deal {deal_id}: {e}")
+            raise # Propagate exception
+
+    async def get_max_rating(self, url: str) -> int:
+        """Gets the max_seen_rating for a deal URL."""
+        try:
+            stmt = select(Deal.max_seen_rating).where(Deal.url == url)
+            result = await self.session.execute(stmt)
+            rating = result.scalar_one_or_none()
+            return rating if rating is not None else 0
+        except Exception as e:
+            logger.error(f"Error getting max rating for {url}: {e}")
+            return 0
+
+    async def update_max_rating(self, url: str, new_rating: int) -> bool:
+        """Updates the max_seen_rating."""
+        try:
+            stmt = update(Deal).where(Deal.url == url).values(max_seen_rating=new_rating)
+            await self.session.execute(stmt)
+            # await self.session.commit() # Caller handles commit if needed, or we keep it here if isolated? 
+            # For simplicity, let's keep it here for standalone updates, or remove to be consistent?
+            # The prompt specificially asked about save_deal + save_history.
+            # update_max_rating is used in Analyzer logic, usually separate. 
+            # But to be safe and consistent with "Atomic Transactions" instruction 
+            # "Refactor DealsRepository to remove internal commits", let's remove it and let Service commit.
+            return True
+        except Exception as e:
+            logger.error(f"Error updating max rating for {url}: {e}")
+            raise 
+
+    async def get_system_config(self) -> Dict[str, float]:
+        """Loads dynamic system config from DB."""
+        config = {}
+        try:
+            result = await self.session.execute(select(SystemConfig))
+            rows = result.scalars().all()
+            for row in rows:
+                try:
+                    config[row.key] = float(row.value)
+                except ValueError:
+                    pass
+        except Exception as e:
+            logger.error(f"Error loading system config: {e}")
+        return config
+
+    async def get_velocity_percentile(self, min_temp: float, hours_window: float, percentile: float) -> float:
+        """
+        Calculates the velocity percentile directly in the database.
+        """
+        try:
+            query = text("""
+                WITH Winners AS (
+                    SELECT deal_id FROM deal_history GROUP BY deal_id HAVING MAX(temperature) >= :min_temp
+                )
+                SELECT PERCENTILE_CONT(:percentile) WITHIN GROUP (ORDER BY velocity)
+                FROM deal_history 
+                WHERE deal_id IN (SELECT deal_id FROM Winners)
+                  AND hours_since_posted <= :hours_window
+                  AND velocity > 0;
+            """)
+            
+            result = await self.session.execute(query, {
+                "min_temp": min_temp, 
+                "percentile": percentile, 
+                "hours_window": hours_window
+            })
+            val = result.scalar_one_or_none()
+            return float(val) if val is not None else 0.0
+        except Exception as e:
+            logger.error(f"Error calculating velocity percentile: {e}")
+            return 0.0
+
+    async def update_system_config_bulk(self, config: Dict[str, float]) -> bool:
+        """
+        Updates multiple system config values in bulk.
+        """
+        if not config:
+            return False
+            
+        try:
+            for key, val in config.items():
+                stmt = insert(SystemConfig).values(
+                    key=key, 
+                    value=str(val)
+                ).on_conflict_do_update(
+                    index_elements=['key'],
+                    set_={'value': str(val)}
+                )
+                await self.session.execute(stmt)
+            
+            # await self.session.commit() # Removed
+            return True
+        except Exception as e:
+            logger.error(f"Error bulk updating system config: {e}")
+            raise
+
+
+--------------------------------------------------------------------------------
+
+# app/repositories/subscribers.py
+
+import logging
+from typing import Set
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.subscribers import Subscriber
+
+logger = logging.getLogger(__name__)
+
+class SubscribersRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        # Table creation is handled by init_db (alembic or create_all)
+
+    async def get_all(self) -> Set[str]:
+        """Retrieves all subscriber chat_ids."""
+        try:
+            result = await self.session.execute(select(Subscriber.chat_id))
+            return {row[0] for row in result.fetchall()}
+        except Exception as e:
+            logger.error(f"Error fetching subscribers: {e}")
+            return set()
+
+    async def add(self, chat_id: str) -> bool:
+        """Adds a subscriber. Returns True if added, False if already exists or error."""
+        try:
+            # Check if exists first to return correct boolean
+            # (or handling IntegrityError, but check is cleaner for boolean return)
+            exists = await self.exists(chat_id)
+            if exists:
+                return False
+            
+            new_sub = Subscriber(chat_id=chat_id)
+            self.session.add(new_sub)
+            await self.session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding subscriber {chat_id}: {e}")
+            await self.session.rollback()
+            return False
+
+    async def remove(self, chat_id: str) -> bool:
+        """Removes a subscriber. Returns True if removed/not found, False on error."""
+        try:
+            await self.session.execute(delete(Subscriber).where(Subscriber.chat_id == chat_id))
+            await self.session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error removing subscriber {chat_id}: {e}")
+            await self.session.rollback()
+            return False
+
+    async def exists(self, chat_id: str) -> bool:
+        try:
+            result = await self.session.execute(select(Subscriber).where(Subscriber.chat_id == chat_id))
+            return result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.error(f"Error checking subscriber {chat_id}: {e}")
+            return False
+
+
+--------------------------------------------------------------------------------
+
+# app/models/deals.py
+
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, func
+from sqlalchemy.orm import relationship
+from .base import Base
+
+class Deal(Base):
+    __tablename__ = "deals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    url = Column(String, unique=True, index=True, nullable=False)
+    title = Column(String)
+    merchant = Column(String)
+    image_url = Column(String)
+    max_seen_rating = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    history = relationship("DealHistory", back_populates="deal")
+
+
+class DealHistory(Base):
+    __tablename__ = "deal_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deal_id = Column(Integer, ForeignKey("deals.id"), nullable=False)
+    temperature = Column(Float)
+    velocity = Column(Float)
+    hours_since_posted = Column(Float)
+    source = Column(String)
+    recorded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    deal = relationship("Deal", back_populates="history")
+
+
+--------------------------------------------------------------------------------
+
+# app/models/system_config.py
+
+from sqlalchemy import Column, String, Float, DateTime, func
+from .base import Base
+
+class SystemConfig(Base):
+    __tablename__ = "system_config"
+
+    key = Column(String, primary_key=True, index=True)
+    value = Column(String) # Storing as string to be flexible, but we cast to float in logic usually
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+--------------------------------------------------------------------------------
+
+# app/models/subscribers.py
+
+from sqlalchemy import Column, String, DateTime, func
+from .base import Base
+
+class Subscriber(Base):
+    __tablename__ = "subscribers"
+
+    chat_id = Column(String, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+--------------------------------------------------------------------------------
+
+# app/models/base.py
+
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+
+--------------------------------------------------------------------------------
+
+# app/db/session.py
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from typing import AsyncGenerator
+from app.core.config import settings
+
+# Modify DB URL to use asyncpg
+DATABASE_URL = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
+engine = create_async_engine(
+    DATABASE_URL, 
+    echo=False, 
+    future=True,
+    connect_args={"statement_cache_size": 0}
+)
+async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Dependency for getting async session."""
+    async with async_session_factory() as session:
+        yield session
+
+# Re-export these for use in main.py
+async def init_db_pool():
+    # SQLAlchemy engine is lazy, no explicit init needed for connection pool
+    pass
+
+async def close_db_pool():
+    await engine.dispose()
+
+
+--------------------------------------------------------------------------------
+
+# app/services/scraper.py
+
+import httpx
+import logging
+import json
+import time
+import re
+import os
+import random
+import asyncio
+from bs4 import BeautifulSoup
+from typing import List, Dict, Any, Optional
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+class ScraperService:
+    def __init__(self):
+        self.client: Optional[httpx.AsyncClient] = None
+
+    async def startup(self):
+        """Initializes the persistent HTTP client."""
+        if self.client is None:
+            self.client = httpx.AsyncClient(
+                timeout=20.0, 
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            )
+            logger.info("ScraperService HTTP client initialized.")
+
+    async def close(self):
+        """Closes the persistent HTTP client."""
+        if self.client:
+            await self.client.aclose()
+            self.client = None
+            logger.info("ScraperService HTTP client closed.")
+
+    def _get_random_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+
+    async def fetch_page(self, url: str) -> Optional[str]:
+        if self.client is None:
+            await self.startup()
+            
+        max_retries = 3
+        backoff_factor = 2
+        
+        for attempt in range(max_retries):
+            try:
+                headers = self._get_random_headers() # Rotate on each request
+                logger.info(f"Fetching {url} (Attempt {attempt+1}/{max_retries})...")
+                
+                response = await self.client.get(url, headers=headers)
+                
+                if response.status_code == 200:
+                    return response.text
+                
+                elif 400 <= response.status_code < 500:
+                        logger.error(f"Client error {response.status_code} fetching {url}. Not retrying.")
+                        return None
+                else:
+                    logger.warning(f"Server error {response.status_code} fetching {url}.")
+            
+            except httpx.RequestError as e:
+                logger.warning(f"Network error fetching {url}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error fetching {url}: {e}")
+                return None
+
+            # Exponential backoff if not last attempt
+            if attempt < max_retries - 1:
+                sleep_time = backoff_factor ** attempt + random.uniform(0, 1)
+                logger.info(f"Retrying in {sleep_time:.2f}s...")
+                await asyncio.sleep(sleep_time)
+
+        logger.error(f"Max retries reached for {url}.")
+        return None
+
+    def _save_debug_html(self, content: str, suffix: str):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{settings.DEBUG_DIR}/debug_html_{suffix}_{timestamp}.html"
+        os.makedirs(settings.DEBUG_DIR, exist_ok=True)
+        try:
+             with open(filename, "w", encoding="utf-8") as f:
+                 f.write(content)
+        except Exception as e:
+             logger.error(f"Could not save debug file: {e}")
+
+    def parse_deals(self, html_content: str) -> List[Dict[str, Any]]:
+        soup = BeautifulSoup(html_content, "html.parser")
+        articles = soup.select("article.thread")
+        logger.info(f"Found {len(articles)} articles.")
+        
+        deals = []
+        processed_urls = set()
+
+        for art in articles:
+            deal = self._extract_deal_info(art)
+            if deal and deal.get("url") and deal["url"] not in processed_urls:
+                processed_urls.add(deal["url"])
+                deals.append(deal)
+        
+        return deals
+
+    def _extract_deal_info(self, art: BeautifulSoup) -> Dict[str, Any]:
+        deal_info = {}
+        
+        # --- 1. Vue Data Extraction Strategy ---
+        vue_data = {}
+        try:
+            vue_elems = art.select("div.js-vue3[data-vue3]")
+            for el in vue_elems:
+                try:
+                    data = json.loads(el.get("data-vue3", "{}"))
+                    if data.get("name") == "ThreadMainListItemNormalizer":
+                        vue_data = data.get("props", {}).get("thread", {})
+                        break
+                except: pass
+        except Exception as e:
+            logger.error(f"Error extracting Vue data: {e}")
+
+        # --- 2. Title & URL ---
+        try:
+            if vue_data:
+                deal_info["title"] = vue_data.get("title")
+                if vue_data.get("titleSlug") and vue_data.get("threadId"):
+                    deal_info["url"] = f"https://www.promodescuentos.com/ofertas/{vue_data['titleSlug']}-{vue_data['threadId']}"
+                else:
+                     deal_info["url"] = vue_data.get("shareableLink") or vue_data.get("link")
+            else:
+                # Fallback HTML
+                title_el = art.select_one("strong.thread-title a, a.thread-link")
+                if not title_el: return {}
+                deal_info["title"] = title_el.get_text(strip=True)
+                link = title_el.get("href", "")
+                if link.startswith("/"): link = "https://www.promodescuentos.com" + link
+                deal_info["url"] = link
+        except Exception as e:
+            logger.error(f"Error extracting Title/URL: {e}")
+            return {}
+
+        # --- 3. Merchant ---
+        deal_info["merchant"] = "N/D"
+        try:
+            if vue_data and vue_data.get("merchant"):
+                 m = vue_data["merchant"]
+                 if isinstance(m, dict):
+                     # Fix: JSON uses 'merchantName', not 'name'
+                     deal_info["merchant"] = m.get("merchantName") or m.get("name") or "N/D"
+                 else:
+                     deal_info["merchant"] = str(m)
+            elif vue_data and vue_data.get("merchantName"):
+                 deal_info["merchant"] = vue_data.get("merchantName")
+            else:
+                # HTML Fallback
+                merchant_el = art.select_one('a[data-t="merchantLink"], span.thread-merchant')
+                if merchant_el:
+                    deal_info["merchant"] = merchant_el.get_text(strip=True).replace("Disponible en", "").strip()
+            
+            # Final Fallback: Extract from title (e.g. "Amazon: Product")
+            if deal_info["merchant"] == "N/D" and deal_info.get("title"):
+                parts = deal_info["title"].split(":", 1)
+                if len(parts) > 1 and len(parts[0]) < 20: # Heuristic for merchant name length
+                    deal_info["merchant"] = parts[0].strip()
+        except Exception as e:
+            logger.debug(f"Error extracting Merchant: {e}")
+
+        # --- 4. Price ---
+        deal_info["price_display"] = None
+        try:
+            if vue_data and "price" in vue_data:
+                 try:
+                     price_val = float(vue_data["price"])
+                     deal_info["price_display"] = f"${price_val:,.2f}" if price_val > 0 else "Gratis"
+                 except: 
+                     deal_info["price_display"] = vue_data.get("priceDisplay")
+            
+            if not deal_info["price_display"]:
+                 # HTML Fallback
+                 price_el = art.select_one(".thread-price")
+                 if price_el:
+                     deal_info["price_display"] = price_el.get_text(strip=True)
+        except Exception as e:
+            logger.debug(f"Error extracting Price: {e}")
+
+        # --- 5. Discount ---
+        deal_info["discount_percentage"] = vue_data.get("discountPercentage")
+        try:
+            if not deal_info["discount_percentage"]:
+                 discount_el = art.select_one(".thread-discount, .textBadge--green")
+                 if discount_el:
+                     txt = discount_el.get_text(strip=True)
+                     if "%" in txt: deal_info["discount_percentage"] = txt
+        except Exception as e:
+            logger.debug(f"Error extracting Discount: {e}")
+
+        # --- 6. Image ---
+        deal_info["image_url"] = None
+        try:
+            if vue_data:
+                main_image = vue_data.get("mainImage", {})
+                if isinstance(main_image, dict):
+                    path = main_image.get("path")
+                    name = main_image.get("name")
+                    if path and name:
+                        deal_info["image_url"] = f"https://static.promodescuentos.com/{path}/{name}.jpg"
+            
+            if not deal_info["image_url"]:
+                 img_el = art.select_one("img.thread-image")
+                 if img_el:
+                     deal_info["image_url"] = img_el.get("data-src") or img_el.get("src")
+                     if deal_info["image_url"] and deal_info["image_url"].startswith("//"):
+                         deal_info["image_url"] = "https:" + deal_info["image_url"]
+        except Exception as e:
+            logger.debug(f"Error extracting Image: {e}")
+        
+        # --- 7. Coupon ---
+        deal_info["coupon_code"] = vue_data.get("voucherCode")
+        try:
+            if not deal_info["coupon_code"]:
+                 coupon_el = art.select_one(".voucher .buttonWithCode-code")
+                 if coupon_el: deal_info["coupon_code"] = coupon_el.get_text(strip=True)
+        except Exception as e:
+            logger.debug(f"Error extracting Coupon: {e}")
+
+        # --- 8. Description ---
+        try:
+            # Try to get from HTML usually best for summary
+            desc_el = art.select_one(".thread-description .userHtml-content, .userHtml.userHtml-content div")
+            if desc_el:
+                desc = desc_el.get_text(strip=True, separator=' ')
+                deal_info["description"] = desc[:280].strip() + "..." if len(desc) > 280 else desc
+            else:
+                 deal_info["description"] = "No disponible"
+        except Exception as e:
+             deal_info["description"] = "No disponible"
+
+        # --- 9. Temperature ---
+        deal_info["temperature"] = 0
+        try:
+            if vue_data:
+                deal_info["temperature"] = float(vue_data.get("temperature", 0))
+            else:
+                temp_el = art.select_one(".vote-temp")
+                if temp_el:
+                    txt = temp_el.get_text(strip=True).replace("°", "").strip()
+                    deal_info["temperature"] = float(txt)
+        except Exception as e:
+            logger.debug(f"Error extracting Temperature: {e}")
+
+        # --- 10. Time ---
+        deal_info["hours_since_posted"] = 999.0
+        deal_info["posted_or_updated"] = "Publicado"
+        try:
+             if vue_data and vue_data.get("publishedAt"):
+                 pub_at = int(vue_data["publishedAt"])
+                 if vue_data.get("threadUpdates"):
+                     deal_info["posted_or_updated"] = "Actualizado"
+                 
+                 diff = time.time() - pub_at
+                 deal_info["hours_since_posted"] = diff / 3600
+             else:
+                 # HTML Fallback for time
+                 time_el = art.select_one("span.chip span.size--all-s")
+                 if time_el:
+                     posted_txt = time_el.get_text(strip=True).lower()
+                     if "actualizado" in posted_txt: deal_info["posted_or_updated"] = "Actualizado"
+                     
+                     # Simple regex parsing
+                     if "min" in posted_txt or "m" in posted_txt.split():
+                         m = re.search(r"(\d+)", posted_txt)
+                         if m: deal_info["hours_since_posted"] = int(m.group(1)) / 60.0
+                     elif "h" in posted_txt:
+                         m = re.search(r"(\d+)", posted_txt)
+                         if m: deal_info["hours_since_posted"] = float(m.group(1))
+        except Exception as e:
+             logger.debug(f"Error extracting Time: {e}")
+        
+        # Posted Text (for 'Expiró' check) -> HTML always
+        try:
+            meta_div = art.select_one(".thread-meta")
+            if meta_div:
+                 deal_info["posted_text"] = meta_div.get_text(strip=True)
+        except Exception as e: pass
+
+        return deal_info
+
+
+--------------------------------------------------------------------------------
+
+# app/services/deals.py
+
+import logging
+from typing import Dict, Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.repositories.deals import DealsRepository
+
+logger = logging.getLogger(__name__)
+
+class DealsService:
+    def __init__(self, deals_repository: DealsRepository):
+        self.deals_repo = deals_repository
+        self.session = deals_repository.session
+
+    async def process_new_deal(self, deal_data: Dict[str, Any]) -> bool:
+        """
+        Atomically saves a deal and its initial history.
+        Implements Unit of Work pattern: saves both or neither.
+        """
+        if not deal_data.get("url"):
+            return False
+
+        try:
+            # 1. Save Deal
+            deal_id = await self.deals_repo.save_deal(deal_data)
+            
+            if not deal_id:
+                raise Exception(f"Failed to get deal ID for {deal_data.get('url')}")
+
+            # 2. Save Initial History
+            # Source "hunter" as per original flow
+            history_saved = await self.deals_repo.save_history(deal_id, deal_data, source="hunter")
+            
+            if not history_saved:
+                 raise Exception(f"Failed to save history for deal {deal_id}")
+
+            # 3. Atomic Commit
+            await self.session.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"Transaction failed for deal {deal_data.get('url')}: {e}")
+            await self.session.rollback()
+            return False
+
+
+--------------------------------------------------------------------------------
+
+# app/services/telegram.py
+
+import httpx
+import logging
+import json
+import asyncio
+from typing import Dict, Any, Optional, Set
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+class TelegramService:
+    def __init__(self):
+        self.base_url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}"
+        self.client = httpx.AsyncClient(timeout=20.0)
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def send_message(self, chat_id: str, text: str = None, deal_data: Dict[str, Any] = None) -> bool:
+        """
+        Envía un mensaje a Telegram. Puede ser un mensaje de oferta (deal_data)
+        o un mensaje de texto simple (text).
+        """
+        if not chat_id:
+            logger.warning("target_chat_id vacío, mensaje no enviado.")
+            return False
+
+        try:
+            payload: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            url_api_path = "/sendMessage"
+
+            if text:
+                payload["text"] = text
+                payload.pop("disable_web_page_preview", None)
+            
+            elif deal_data:
+                self._prepare_deal_payload(deal_data, payload)
+                if "photo" in payload:
+                    url_api_path = "/sendPhoto"
+            else:
+                logger.warning("send_message llamado sin deal_data ni text.")
+                return False
+
+            url_api = f"{self.base_url}{url_api_path}"
+            
+            response = await self.client.post(url_api, json=payload)
+            response.raise_for_status()
+            logger.info(f"Mensaje Telegram enviado a: {chat_id}")
+            # await asyncio.sleep(1) # Removed for bulk optimization
+            return True
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Error en API de Telegram para {chat_id}: {e}")
+            logger.error(f"Respuesta API Telegram: {e.response.text}")
+            return False
+        except Exception as e:
+            logger.exception(f"Excepción envíando a {chat_id}: {e}")
+            return False
+
+    async def send_bulk_notifications(self, chat_ids: Set[str], deal_data: Dict[str, Any]):
+        """
+        Envía notificaciones a múltiples usuarios de forma concurrente pero controlada.
+        """
+        if not chat_ids:
+            return
+
+        semaphore = asyncio.Semaphore(10) # Limit concurrent requests to prevent 429s
+
+        async def _bounded_send(chat_id):
+            async with semaphore:
+                try:
+                    await self.send_message(chat_id, deal_data=deal_data)
+                except Exception as e:
+                    logger.error(f"Error enviando bulk a {chat_id}: {e}")
+
+        logger.info(f"Iniciando envío masivo a {len(chat_ids)} usuarios...")
+        start_time = asyncio.get_running_loop().time()
+        
+        tasks = [_bounded_send(chat_id) for chat_id in chat_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        duration = asyncio.get_running_loop().time() - start_time
+        logger.info(f"Envío masivo completado en {duration:.2f}s")
+
+    def _prepare_deal_payload(self, deal_data: Dict[str, Any], payload: Dict[str, Any]):
+        """Helper to formatting deal message."""
+        rating = deal_data.get('rating', 0) # Calculated by AnalyzerService usually
+        # If rating is not present, we might want to calculate or pass it. 
+        # Assuming AnalyzerService enriched the dict or we calculate simply here?
+        # Let's rely on enriched data or defaults.
+        
+        emoji = "🔥" * rating
+        hours_posted = float(deal_data.get('hours_since_posted', 0))
+        
+        if hours_posted >= 1:
+            time_ago_text = f"{round(hours_posted)} horas" if hours_posted >= 1.5 else "1 hora"
+        else:
+            minutes = round(hours_posted * 60)
+            time_ago_text = f"{minutes} minutos" if minutes > 1 else "1 minuto"
+
+        price = deal_data.get('price_display')
+        price_text = f"<b>Precio:</b> {price}" if price and price != "N/D" else ""
+        
+        discount = deal_data.get('discount_percentage')
+        discount_text = f"<b>Descuento:</b> {discount}" if discount else ""
+        
+        coupon = deal_data.get('coupon_code')
+        if coupon:
+            coupon_safe = coupon.replace('<', '&lt;').replace('>', '&gt;')
+            coupon_text = f"<b>Cupón:</b> <code>{coupon_safe}</code>"
+        else:
+            coupon_text = ""
+
+        opt_lines = "\n".join(filter(None, [price_text, discount_text, coupon_text]))
+        if opt_lines: opt_lines = "\n" + opt_lines
+
+        title = str(deal_data.get('title', '')).replace('<', '&lt;').replace('>', '&gt;')
+        desc = str(deal_data.get('description', '')).replace('<', '&lt;').replace('>', '&gt;')
+        merchant = str(deal_data.get('merchant') or 'N/D').replace('<', '&lt;').replace('>', '&gt;')
+        temp = float(deal_data.get('temperature', 0))
+
+        message_content = f"""
+<b>{title}</b>
+
+<b>Calificación:</b> {temp:.0f}° {emoji}
+<b>{deal_data.get('posted_or_updated', 'Publicado')} hace:</b> {time_ago_text}
+<b>Comercio:</b> {merchant}
+{opt_lines}
+
+<b>Descripción:</b>
+{desc}
+        """.strip()
+
+        deal_url = deal_data.get('url', '')
+        if deal_url:
+            reply_markup = {
+                "inline_keyboard": [[{"text": "Ver Oferta", "url": deal_url}]]
+            }
+            payload["reply_markup"] = json.dumps(reply_markup)
+
+        image_url = deal_data.get('image_url', '')
+        if image_url and isinstance(image_url, str) and image_url.startswith(('http', 'https')):
+            payload["photo"] = image_url
+            payload["caption"] = message_content
+            if len(message_content) > 1024:
+                payload["caption"] = message_content[:1020] + "..."
+        else:
+            payload["text"] = message_content
+            if len(message_content) > 4096:
+                payload["text"] = message_content[:4092] + "..."
+
+
+--------------------------------------------------------------------------------
+
+# app/services/analyzer.py
+
+import logging
+from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
+
+class AnalyzerService:
+    def __init__(self, system_config: Dict[str, float]):
+        self.config = system_config
+
+    def update_config(self, new_config: Dict[str, float]):
+        self.config = new_config
+
+    def is_deal_invalid(self, deal: Dict[str, Any]) -> bool:
+        """
+        Check if deal is clearly invalid/expired.
+        Returns True if invalid.
+        """
+        posted_text = deal.get("posted_text", "")
+        if "Expiró" in posted_text:
+            return True
+        return False
+
+    def is_deal_hot(self, deal: Dict[str, Any]) -> bool:
+        """
+        Determines if a deal is worthy of notification based on temperature and time.
+        """
+        if self.is_deal_invalid(deal):
+            return False
+            
+        temp = float(deal.get("temperature", 0))
+        hours = float(deal.get("hours_since_posted", 999))
+        minutes = max(1, hours * 60)
+        velocity = temp / minutes
+
+        # 1. Dynamic Checks (Configurable via DB -> system_config)
+        # Instant Kill
+        vel_instant = self.config.get("velocity_instant_kill", 1.7)
+        min_temp_instant = self.config.get("min_temp_instant_kill", 15.0)
+        if minutes <= 15 and velocity >= vel_instant and temp >= min_temp_instant:
+            logger.info(f"HOT: Instant Kill! {deal.get('url')}")
+            return True
+
+        # Fast Rising
+        vel_fast = self.config.get("velocity_fast_rising", 1.1)
+        min_temp_fast = self.config.get("min_temp_fast_rising", 30.0)
+        if minutes <= 30 and velocity >= vel_fast and temp >= min_temp_fast:
+             logger.info(f"HOT: Fast Rising! {deal.get('url')}")
+             return True
+
+        # 2. Static Rules (Legacy)
+        if temp >= 150 and hours < 1: return True
+        if temp >= 300 and hours < 2: return True
+        if temp >= 500 and hours < 5: return True
+        if temp >= 1000 and hours < 8: return True
+
+        return False
+
+    def calculate_rating(self, deal: Dict[str, Any]) -> int:
+        """Calculates fire rating (1-4)."""
+        temp = float(deal.get("temperature", 0))
+        hours = float(deal.get("hours_since_posted", 0))
+        minutes = max(1, hours * 60)
+        velocity = temp / minutes
+
+        if minutes <= 30 and velocity >= 1.2:
+            return 4
+
+        if temp < 300 and hours < 2:
+            if hours < 0.5: return 4
+            if hours < 1: return 3
+            if hours < 1.5: return 2
+            return 1
+        else:
+            if temp >= 1000: return 4
+            if temp >= 500: return 3
+            if temp >= 300: return 2
+            return 1
+
+
+--------------------------------------------------------------------------------
+
+# app/services/optimizer.py
+
+import logging
+# import statistics # Removed as no longer needed
+from typing import List, Dict, Any
+from app.repositories.deals import DealsRepository
+
+logger = logging.getLogger(__name__)
+
+class AutoTunerService:
+    def __init__(self, deals_repository: DealsRepository):
+        self.deals_repo = deals_repository
+
+    async def optimize(self):
+        logger.info("🧠 Iniciando ciclo de optimización (AutoTuner - SQL Optimized)...")
+        
+        try:
+            new_config = {}
+
+            # --- ANALYSIS FOR INSTANT KILL (< 15 min) ---
+            # Winners > 200 deg, < 15 min, 20th Percentile (0.2)
+            p20_15m = await self.deals_repo.get_velocity_percentile(min_temp=200, hours_window=0.25, percentile=0.2)
+            
+            if p20_15m > 0:
+                suggested_kill = max(1.0, min(5.0, p20_15m))
+                new_config["velocity_instant_kill"] = round(suggested_kill, 2)
+                logger.info(f"📊 Análisis <15m: P20={p20_15m:.2f} -> Nuevo 'Instant Kill': {new_config['velocity_instant_kill']}")
+            else:
+                logger.warning(f"Insuficientes datos para <15m o P20 es 0. Manteniendo config.")
+
+            # --- ANALYSIS FOR FAST RISING (< 30 min) ---
+            # Winners > 100 deg, < 30 min, 20th Percentile (0.2)
+            p20_30m = await self.deals_repo.get_velocity_percentile(min_temp=100, hours_window=0.5, percentile=0.2)
+
+            if p20_30m > 0:
+                suggested_rise = max(0.5, min(3.0, p20_30m))
+                new_config["velocity_fast_rising"] = round(suggested_rise, 2)
+                logger.info(f"📊 Análisis <30m: P20={p20_30m:.2f} -> Nuevo 'Fast Rising': {new_config['velocity_fast_rising']}")
+            else:
+                logger.warning(f"Insuficientes datos para <30m o P20 es 0. Manteniendo config.")
+
+            # --- UPDATE DB ---
+            if new_config:
+                logger.info(f"💾 Actualizando configuración en BD: {new_config}")
+                success = await self.deals_repo.update_system_config_bulk(new_config)
+                if success:
+                    await self.deals_repo.session.commit() # Unit of Work: Commit explicitly
+                    logger.info("✅ Configuración optimizada exitosamente.")
+            else:
+                logger.info("⏹ No hay cambios suficientes para aplicar.")
+
+        except Exception as e:
+            logger.error(f"Error en proceso de optimización: {e}")
+
+
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+
+# render.yaml
+
+services:
+  - type: web # Tipo de servicio (puede ser 'worker' si no necesitas exponer HTTP públicamente, pero 'web' está bien para el health check)
+    name: promodescuentos-scraper # Nombre del servicio en Render
+    env: docker # Indica que usaremos Docker
+    # dockerfilePath: ./Dockerfile # Descomentar si tu Dockerfile no está en la raíz
+    # dockerContext: .          # Descomentar si el contexto no es la raíz
+    healthCheckPath: / # Ruta para el health check (que tu servidor HTTP ya expone)
+    plan: free # O el plan que estés usando (e.g., starter) - ¡OJO! Planes gratuitos pueden ser lentos para Selenium.
+    # IMPORTANTE: Comando para iniciar tu aplicación dentro del contenedor
+    startCommand: python scrape_promodescuentos.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # Marca como secreto en Render
+      - key: TELEGRAM_CHAT_ID
+        sync: false # Marca como secreto en Render
+      - key: PYTHONUNBUFFERED # Recomendado para logs en Docker
+        value: "1"
+      - key: PYTHONIOENCODING # Asegura UTF-8 para logs
+        value: "UTF-8"
+
+
+--------------------------------------------------------------------------------
+
+** requirements.txt **
+
+beautifulsoup4
+python-dotenv
+requests
+pydantic
+pydantic-settings
+fastapi
+uvicorn
+httpx
+asyncpg
+sqlalchemy
+pydantic-settings
+fastapi
+uvicorn
+httpx
+
+
+--------------------------------------------------------------------------------
+
+# app/dependencies.py
+
+from fastapi import Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.session import get_db
+from app.repositories.subscribers import SubscribersRepository
+from app.repositories.deals import DealsRepository
+from app.services.telegram import TelegramService
+from app.services.scraper import ScraperService
+
+async def get_subscribers_repo(session: AsyncSession = Depends(get_db)) -> SubscribersRepository:
+    return SubscribersRepository(session)
+
+async def get_deals_repo(session: AsyncSession = Depends(get_db)) -> DealsRepository:
+    return DealsRepository(session)
+
+def get_telegram_service(request: Request) -> TelegramService:
+    return request.app.state.telegram_service
+
+def get_scraper_service(request: Request) -> ScraperService:
+    return request.app.state.scraper_service
+
+
+--------------------------------------------------------------------------------
+
+# app/main.py
+
+import logging
+import asyncio
+import os
+import json
+import random
+import httpx
+from contextlib import asynccontextmanager
+from typing import Dict, Any, Set
+from fastapi import FastAPI, Request, HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+from app.core.config import settings
+from app.core.logging_config import setup_logging
+from app.db.session import engine, async_session_factory, get_db
+from app.models.base import Base
+from app.repositories.subscribers import SubscribersRepository
+from app.repositories.deals import DealsRepository
+from app.services.telegram import TelegramService
+from app.services.scraper import ScraperService
+from app.services.analyzer import AnalyzerService
+from app.services.optimizer import AutoTunerService
+from app.services.deals import DealsService
+from app.services.scheduler import SchedulerService
+from app.dependencies import get_subscribers_repo, get_telegram_service
+
+# Initialize logging
+setup_logging()
+logger = logging.getLogger(__name__)
+
+# Global state
+shutdown_event = asyncio.Event()
+
+async def setup_webhook():
+    if settings.APP_BASE_URL and settings.TELEGRAM_BOT_TOKEN:
+        webhook_url = f"{settings.APP_BASE_URL.rstrip('/')}/webhook/{settings.TELEGRAM_BOT_TOKEN}"
+        try:
+            url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/setWebhook"
+            async with httpx.AsyncClient() as client:
+                await client.post(url, params={"url": webhook_url}, timeout=10.0)
+            logger.info(f"Webhook set to {webhook_url}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}")
+
+async def init_db_content():
+    """Initializes database with default config and indexes."""
+    try:
+        async with async_session_factory() as session:
+            # 0. Schema Migrations (idempotent)
+            logger.info("Running schema migrations...")
+            await session.execute(text("ALTER TABLE deal_history ADD COLUMN IF NOT EXISTS viral_score FLOAT DEFAULT 0.0;"))
+            
+            # New columns for standard Deal tracking
+            try:
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1;"))
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS last_tracked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;"))
+                await session.execute(text("ALTER TABLE deals ADD COLUMN IF NOT EXISTS activity_status TEXT DEFAULT 'active';"))
+            except Exception as e:
+                logger.warning(f"Migration warning (columns might exist): {e}")
+
+            # New table deal_outcomes
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS deal_outcomes (
+                    id SERIAL PRIMARY KEY,
+                    deal_id INTEGER NOT NULL UNIQUE REFERENCES deals(id),
+                    final_max_temp FLOAT DEFAULT 0.0,
+                    reached_200 INTEGER DEFAULT 0,
+                    reached_500 INTEGER DEFAULT 0,
+                    reached_1000 INTEGER DEFAULT 0,
+                    time_to_200_mins FLOAT,
+                    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            """))
+            
+            # 1. Create Indexes (idempotent)
+            logger.info("Verifying indexes...")
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deal_history_deal_hours ON deal_history(deal_id, hours_since_posted);"))
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deals_url ON deals(url);"))
+            await session.execute(text("CREATE INDEX IF NOT EXISTS idx_deals_created ON deals(created_at);"))
+            
+            # 2. Seed Default Config
+            logger.info("Seeding default configuration...")
+            defaults = [
+                # Legacy velocity thresholds
+                ('velocity_instant_kill', '4.0'),
+                ('velocity_fast_rising', '3.0'),
+                ('min_temp_instant_kill', '15'),
+                ('min_temp_fast_rising', '30'),
+                # Advanced Scoring Engine
+                ('viral_threshold', '50.0'),
+                ('min_seed_temp', '15.0'),
+                ('gravity', '1.2'),
+                ('score_tier_4', '500.0'),
+                ('score_tier_3', '200.0'),
+                ('score_tier_2', '100.0'),
+            ]
+            for key, val in defaults:
+                await session.execute(
+                    text("INSERT INTO system_config (key, value) VALUES (:key, :val) ON CONFLICT (key) DO NOTHING"),
+                    {"key": key, "val": val}
+                )
+            await session.commit()
+            logger.info("Database initialized successfully.")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+
+async def run_migration():
+    """Migrates subscribers.json to PostgreSQL if it exists."""
+    json_path = "subscribers.json"
+    if os.path.exists(json_path):
+        logger.info(f"Detectado archivo legado {json_path}. Iniciando migración...")
+        try:
+            async with async_session_factory() as session:
+                sub_repo = SubscribersRepository(session)
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        count = 0
+                        for chat_id in data:
+                            if await sub_repo.add(str(chat_id)):
+                                count += 1
+                        logger.info(f"Migrados {count} suscriptores a la BD.")
+                    else:
+                        logger.warning("Formato de subscribers.json inválido (no es lista).")
+                
+                os.rename(json_path, json_path + ".bak")
+                logger.info(f"Archivo {json_path} renombrado a .bak")
+        except Exception as e:
+            logger.error(f"Error durante migración: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Initializing services...")
+    
+    # Initialize services
+    scraper_service = ScraperService()
+    telegram_service = TelegramService()
+    scheduler_service = SchedulerService(scraper_service, telegram_service)
+    
+    # Attach to app state for dependency injection
+    app.state.scraper_service = scraper_service
+    app.state.telegram_service = telegram_service
+    app.state.scheduler_service = scheduler_service
+    
+    # Create tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    await run_migration()
+    await init_db_content()
+    await setup_webhook()
+    await scraper_service.startup()
+
+    # Start Scheduler (which launches background tasks)
+    await scheduler_service.start()
+
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down services...")
+    shutdown_event.set() # Redundant if using scheduler.stop() but harmless
+    
+    await scheduler_service.stop()
+    await telegram_service.close()
+    await scraper_service.close()
+    await engine.dispose()
+    logger.info("Shutdown complete.")
+
+app = FastAPI(lifespan=lifespan)
+
+@app.get("/")
+async def root():
+    return {"status": "running", "service": "promodescuentos-bot"}
+
+@app.get("/health")
+async def health_check(session: AsyncSession = Depends(get_db)):
+    # Verify DB connection
+    try:
+        await session.execute(text("SELECT 1"))
+        return {"status": "healthy", "db": "connected"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Database connectivity failed")
+
+@app.post(f"/webhook/{settings.TELEGRAM_BOT_TOKEN}")
+async def webhook(
+    request: Request, 
+    sub_repo: SubscribersRepository = Depends(get_subscribers_repo),
+    telegram_service: TelegramService = Depends(get_telegram_service)
+):
+    try:
+        update = await request.json()
+        if 'message' in update:
+            msg = update['message']
+            chat_id = str(msg['chat']['id'])
+            text = msg.get('text', '').lower()
+            
+            if text in ['/start', '/subscribe']:
+                if await sub_repo.add(chat_id):
+                    await telegram_service.send_message(chat_id, text="¡Suscrito! 🎉 Recibirás ofertas calientes.")
+                else:
+                    await telegram_service.send_message(chat_id, text="Ya estás suscrito.")
+            elif text in ['/stop', '/unsubscribe']:
+                await sub_repo.remove(chat_id)
+                await telegram_service.send_message(chat_id, text="Suscripción cancelada.")
+            else:
+                 await telegram_service.send_message(chat_id, text="Usa /start para suscribirte o /stop para cancelar.")
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Error")
+
+
+--------------------------------------------------------------------------------
+
+# app/core/config.py
+
+import os
+from typing import Set
+from pydantic import Field, computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    """
+    Application settings managed by Pydantic.
+    Reads from environment variables and .env file.
+    """
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    # App
+    APP_BASE_URL: str = Field(default="", description="Base URL of the application")
+    DEBUG: bool = Field(default=False, description="Debug mode")
+    
+    # Database
+    DATABASE_URL: str = Field(..., description="PostgreSQL Database URL")
+
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram Bot Token")
+    ADMIN_CHAT_IDS_STR: str = Field(default="", alias="ADMIN_CHAT_IDS")
+
+    # Scraping Defaults (Dynamic config overrides these from DB)
+    DEFAULT_VELOCITY_INSTANT_KILL: float = 1.7
+    DEFAULT_VELOCITY_FAST_RISING: float = 1.1
+    DEFAULT_MIN_TEMP_INSTANT_KILL: float = 15.0
+    DEFAULT_MIN_TEMP_FAST_RISING: float = 30.0
+
+    # Paths
+    DEBUG_DIR: str = Field(default="debug", description="Directory for debug files")
+    HISTORY_FILE: str = Field(default="deals_history.csv", description="CSV file for storing history (Legacy)")
+
+    @computed_field
+    def ADMIN_CHAT_IDS(self) -> Set[str]:
+        """Parses the comma-separated string of admin IDs into a set."""
+        if not self.ADMIN_CHAT_IDS_STR:
+            return set()
+        return {chat_id.strip() for chat_id in self.ADMIN_CHAT_IDS_STR.split(',') if chat_id.strip()}
+
+settings = Settings()
+
+
+--------------------------------------------------------------------------------
+
+# app/core/logging_config.py
+
+import logging
+import sys
+from app.core.config import settings
+
+def setup_logging():
+    """Confirms logging configuration for the application."""
+    log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+    
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler("app.log", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    # Metter down chatter from requests/urllib3 if needed
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+--------------------------------------------------------------------------------
+
+# app/db/session.py
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from typing import AsyncGenerator
+from app.core.config import settings
+
+# Modify DB URL to use asyncpg
+DATABASE_URL = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
+engine = create_async_engine(
+    DATABASE_URL, 
+    echo=False, 
+    future=True,
+    connect_args={"statement_cache_size": 0}
+)
+async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Dependency for getting async session."""
+    async with async_session_factory() as session:
+        yield session
+
+# Re-export these for use in main.py
+async def init_db_pool():
+    # SQLAlchemy engine is lazy, no explicit init needed for connection pool
+    pass
+
+async def close_db_pool():
+    await engine.dispose()
+
+
+--------------------------------------------------------------------------------
+
+# app/models/base.py
+
+from sqlalchemy.ext.declarative import declarative_base
+
+Base = declarative_base()
+
+
+--------------------------------------------------------------------------------
+
+# app/models/deals.py
+
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, func
+from sqlalchemy.orm import relationship
+from .base import Base
+
+class Deal(Base):
+    __tablename__ = "deals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    url = Column(String, unique=True, index=True, nullable=False)
+    title = Column(String)
+    merchant = Column(String)
+    image_url = Column(String)
+    max_seen_rating = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Tracking fields
+    is_active = Column(Integer, default=1) # 1=True, 0=False (SQLite boolean compat)
+    last_tracked_at = Column(DateTime(timezone=True), server_default=func.now())
+    activity_status = Column(String, default="active") # active, expired, settled
+
+    history = relationship("DealHistory", back_populates="deal")
+    outcome = relationship("DealOutcome", back_populates="deal", uselist=False)
+
+
+class DealHistory(Base):
+    __tablename__ = "deal_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deal_id = Column(Integer, ForeignKey("deals.id"), nullable=False)
+    temperature = Column(Float)
+    velocity = Column(Float)
+    viral_score = Column(Float, default=0.0)
+    hours_since_posted = Column(Float)
+    source = Column(String)
+    recorded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    deal = relationship("Deal", back_populates="history")
+
+
+class DealOutcome(Base):
+    __tablename__ = "deal_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    deal_id = Column(Integer, ForeignKey("deals.id"), unique=True, nullable=False)
+    
+    final_max_temp = Column(Float, default=0.0)
+    reached_200 = Column(Integer, default=0) # Boolean
+    reached_500 = Column(Integer, default=0) # Boolean
+    reached_1000 = Column(Integer, default=0) # Boolean
+    time_to_200_mins = Column(Float, nullable=True)
+    
+    last_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    deal = relationship("Deal", back_populates="outcome")
+
+
+--------------------------------------------------------------------------------
+
+# app/models/subscribers.py
+
+from sqlalchemy import Column, String, DateTime, func
+from .base import Base
+
+class Subscriber(Base):
+    __tablename__ = "subscribers"
+
+    chat_id = Column(String, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+--------------------------------------------------------------------------------
+
+# app/models/system_config.py
+
+from sqlalchemy import Column, String, Float, DateTime, func
+from .base import Base
+
+class SystemConfig(Base):
+    __tablename__ = "system_config"
+
+    key = Column(String, primary_key=True, index=True)
+    value = Column(String) # Storing as string to be flexible, but we cast to float in logic usually
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+--------------------------------------------------------------------------------
+
+# app/repositories/deals.py
+
+import logging
+from typing import Dict, Any, Optional, List, Tuple
+from sqlalchemy import select, update, func, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert
+
+from app.models.deals import Deal, DealHistory, DealOutcome
+from app.models.system_config import SystemConfig
+
+logger = logging.getLogger(__name__)
+
+class DealsRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def save_deal(self, deal_data: Dict[str, Any]) -> Optional[int]:
+        """
+        Saves or updates a deal in the database. Returns the deal ID.
+        Does NOT commit.
+        """
+        try:
+            stmt = insert(Deal).values(
+                url=deal_data.get("url"),
+                title=deal_data.get("title"),
+                merchant=deal_data.get("merchant", ""),
+                image_url=deal_data.get("image_url", ""),
+            ).on_conflict_do_update(
+                index_elements=['url'],
+                set_={
+                    'title': deal_data.get("title"),
+                    'merchant': deal_data.get("merchant", ""),
+                    'image_url': deal_data.get("image_url", "")
+                }
+            ).returning(Deal.id)
+
+            result = await self.session.execute(stmt)
+            return result.scalar_one()
+
+        except Exception as e:
+            logger.error(f"Error saving deal {deal_data.get('url')}: {e}")
+            raise
+
+    async def save_history(self, deal_id: int, deal_data: Dict[str, Any], source: str, viral_score: float = 0.0) -> bool:
+        """
+        Saves a history record for a deal.
+        Does NOT commit.
+        """
+        try:
+            temp = float(deal_data.get("temperature", 0))
+            hours = float(deal_data.get("hours_since_posted", 0))
+            minutes = max(1, hours * 60)
+            velocity = temp / minutes
+
+            new_history = DealHistory(
+                deal_id=deal_id,
+                temperature=temp,
+                velocity=velocity,
+                viral_score=viral_score,
+                hours_since_posted=hours,
+                source=source
+            )
+            self.session.add(new_history)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving history for deal {deal_id}: {e}")
+            raise
+
+    async def get_max_rating(self, url: str) -> int:
+        """Gets the max_seen_rating for a deal URL."""
+        try:
+            stmt = select(Deal.max_seen_rating).where(Deal.url == url)
+            result = await self.session.execute(stmt)
+            rating = result.scalar_one_or_none()
+            return rating if rating is not None else 0
+        except Exception as e:
+            logger.error(f"Error getting max rating for {url}: {e}")
+            return 0
+
+    async def update_max_rating(self, url: str, new_rating: int) -> bool:
+        """Updates the max_seen_rating."""
+        try:
+            stmt = update(Deal).where(Deal.url == url).values(max_seen_rating=new_rating)
+            await self.session.execute(stmt)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating max rating for {url}: {e}")
+            raise 
+
+    async def get_latest_snapshot(self, deal_url: str) -> Optional[Tuple[float, float]]:
+        """
+        Returns the most recent (temperature, hours_since_posted) from deal_history
+        for a given deal URL. Used for acceleration detection.
+        """
+        try:
+            query = text("""
+                SELECT dh.temperature, dh.hours_since_posted
+                FROM deal_history dh
+                JOIN deals d ON d.id = dh.deal_id
+                WHERE d.url = :url
+                ORDER BY dh.recorded_at DESC
+                LIMIT 1;
+            """)
+            result = await self.session.execute(query, {"url": deal_url})
+            row = result.first()
+            if row:
+                return (float(row[0]), float(row[1]))
+            return None
+        except Exception as e:
+            logger.error(f"Error getting latest snapshot for {deal_url}: {e}")
+            return None
+
+    async def get_latest_snapshots_batch(self, deal_urls: List[str]) -> Dict[str, Tuple[float, float]]:
+        """
+        Batch version: returns latest (temperature, hours_since_posted) for multiple deal URLs.
+        Returns a dict keyed by URL.
+        """
+        if not deal_urls:
+            return {}
+        try:
+            query = text("""
+                SELECT DISTINCT ON (d.url) d.url, dh.temperature, dh.hours_since_posted
+                FROM deal_history dh
+                JOIN deals d ON d.id = dh.deal_id
+                WHERE d.url = ANY(:urls)
+                ORDER BY d.url, dh.recorded_at DESC;
+            """)
+            result = await self.session.execute(query, {"urls": deal_urls})
+            rows = result.fetchall()
+            return {row[0]: (float(row[1]), float(row[2])) for row in rows}
+        except Exception as e:
+            logger.error(f"Error getting batch snapshots: {e}")
+            return {}
+
+    async def get_golden_ratio_stats(self, checkpoint_hours: float, min_temp_at_checkpoint: float, success_temp: float) -> Dict[str, Any]:
+        """
+        Golden Ratio Analysis: Of deals that had >= min_temp at checkpoint_hours,
+        what percentage reached success_temp?
+        
+        Returns: {probability: float, sample_size: int, successes: int}
+        """
+        try:
+            query = text("""
+                WITH candidates AS (
+                    SELECT DISTINCT dh.deal_id
+                    FROM deal_history dh
+                    WHERE dh.hours_since_posted <= :checkpoint
+                      AND dh.temperature >= :min_temp
+                ),
+                outcomes AS (
+                    SELECT c.deal_id,
+                           MAX(dh2.temperature) as max_temp
+                    FROM candidates c
+                    JOIN deal_history dh2 ON dh2.deal_id = c.deal_id
+                    GROUP BY c.deal_id
+                )
+                SELECT 
+                    COUNT(*) as sample_size,
+                    COUNT(*) FILTER (WHERE max_temp >= :success_temp) as successes
+                FROM outcomes;
+            """)
+            result = await self.session.execute(query, {
+                "checkpoint": checkpoint_hours,
+                "min_temp": min_temp_at_checkpoint,
+                "success_temp": success_temp
+            })
+            row = result.first()
+            if row and row[0] > 0:
+                return {
+                    "sample_size": int(row[0]),
+                    "successes": int(row[1]),
+                    "probability": round(int(row[1]) / int(row[0]) * 100, 1)
+                }
+            return {"sample_size": 0, "successes": 0, "probability": 0.0}
+        except Exception as e:
+            logger.error(f"Error calculating golden ratio: {e}")
+            return {"sample_size": 0, "successes": 0, "probability": 0.0}
+
+    async def get_viral_score_percentile(self, min_final_temp: float, hours_window: float, percentile: float) -> float:
+        """
+        Calculates the viral_score percentile from historical winners.
+        Used by AutoTuner to dynamically set viral_threshold.
+        """
+        try:
+            query = text("""
+                WITH Winners AS (
+                    SELECT deal_id FROM deal_history GROUP BY deal_id HAVING MAX(temperature) >= :min_temp
+                )
+                SELECT PERCENTILE_CONT(:percentile) WITHIN GROUP (ORDER BY viral_score)
+                FROM deal_history 
+                WHERE deal_id IN (SELECT deal_id FROM Winners)
+                  AND hours_since_posted <= :hours_window
+                  AND viral_score > 0;
+            """)
+            result = await self.session.execute(query, {
+                "min_temp": min_final_temp,
+                "percentile": percentile,
+                "hours_window": hours_window
+            })
+            val = result.scalar_one_or_none()
+            return float(val) if val is not None else 0.0
+        except Exception as e:
+            logger.error(f"Error calculating viral score percentile: {e}")
+            return 0.0
+
+    async def get_system_config(self) -> Dict[str, float]:
+        """Loads dynamic system config from DB."""
+        config = {}
+        try:
+            result = await self.session.execute(select(SystemConfig))
+            rows = result.scalars().all()
+            for row in rows:
+                try:
+                    config[row.key] = float(row.value)
+                except ValueError:
+                    pass
+        except Exception as e:
+            logger.error(f"Error loading system config: {e}")
+        return config
+
+    async def get_velocity_percentile(self, min_temp: float, hours_window: float, percentile: float) -> float:
+        """
+        Calculates the velocity percentile directly in the database.
+        Legacy method kept for backwards compatibility.
+        """
+        try:
+            query = text("""
+                WITH Winners AS (
+                    SELECT deal_id FROM deal_history GROUP BY deal_id HAVING MAX(temperature) >= :min_temp
+                )
+                SELECT PERCENTILE_CONT(:percentile) WITHIN GROUP (ORDER BY velocity)
+                FROM deal_history 
+                WHERE deal_id IN (SELECT deal_id FROM Winners)
+                  AND hours_since_posted <= :hours_window
+                  AND velocity > 0;
+            """)
+            
+            result = await self.session.execute(query, {
+                "min_temp": min_temp, 
+                "percentile": percentile, 
+                "hours_window": hours_window
+            })
+            val = result.scalar_one_or_none()
+            return float(val) if val is not None else 0.0
+        except Exception as e:
+            logger.error(f"Error calculating velocity percentile: {e}")
+            return 0.0
+
+    async def update_system_config_bulk(self, config: Dict[str, float]) -> bool:
+        """Updates multiple system config values in bulk."""
+        if not config:
+            return False
+            
+        try:
+            for key, val in config.items():
+                stmt = insert(SystemConfig).values(
+                    key=key, 
+                    value=str(val)
+                ).on_conflict_do_update(
+                    index_elements=['key'],
+                    set_={'value': str(val)}
+                )
+                await self.session.execute(stmt)
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error bulk updating system config: {e}")
+            raise
+            raise
+
+    async def get_by_url(self, url: str) -> Optional[Deal]:
+        """Retrieves a Deal by its URL."""
+        try:
+            stmt = select(Deal).where(Deal.url == url)
+            result = await self.session.execute(stmt)
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting deal by url {url}: {e}")
+            return None
+
+    async def get_outcome(self, deal_id: int) -> Optional[DealOutcome]:
+        """Retrieves the DealOutcome for a given deal_id."""
+        try:
+            stmt = select(DealOutcome).where(DealOutcome.deal_id == deal_id)
+            result = await self.session.execute(stmt)
+            return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Error getting outcome for deal {deal_id}: {e}")
+            return None
+
+    async def get_training_dataset(self, checkpoint_mins: int = 30) -> List[Dict[str, Any]]:
+        """
+        Fetches a dataset for training/validation.
+        Features: derived from DealHistory at approx 'checkpoint_mins' after posting.
+        Labels: derived from DealOutcome (final_max_temp, reached_X).
+        """
+        try:
+            # We want the snapshot closest to checkpoint_mins, but not BEFORE it (to avoid lookahead bias? 
+            # actually we want the state AT that time). 
+            # Let's simple pick the first history record where hours_since_posted * 60 >= checkpoint_mins
+            
+            query = text("""
+                WITH TargetSnapshots AS (
+                    SELECT DISTINCT ON (dh.deal_id) 
+                        dh.deal_id,
+                        dh.temperature as temp_at_checkpoint,
+                        dh.velocity as velocity_at_checkpoint,
+                        dh.viral_score as score_at_checkpoint,
+                        dh.hours_since_posted
+                    FROM deal_history dh
+                    WHERE dh.hours_since_posted * 60 >= :mins
+                    ORDER BY dh.deal_id, dh.hours_since_posted ASC
+                )
+                SELECT 
+                    ts.deal_id,
+                    ts.temp_at_checkpoint,
+                    ts.velocity_at_checkpoint,
+                    ts.score_at_checkpoint,
+                    doc.final_max_temp,
+                    doc.reached_500,
+                    extract(ISODOW from d.created_at) as dow,
+                    extract(HOUR from d.created_at) as hour_of_day
+                FROM TargetSnapshots ts
+                JOIN deal_outcomes doc ON doc.deal_id = ts.deal_id
+                JOIN deals d ON d.id = ts.deal_id
+                WHERE doc.final_max_temp > 0;
+            """)
+            
+            result = await self.session.execute(query, {"mins": checkpoint_mins})
+            rows = result.mappings().all()
+            return [dict(row) for row in rows]
+            
+        except Exception as e:
+            logger.error(f"Error fetching training dataset: {e}")
+            return []
+
+
+--------------------------------------------------------------------------------
+
+# app/repositories/subscribers.py
+
+import logging
+from typing import Set
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.subscribers import Subscriber
+
+logger = logging.getLogger(__name__)
+
+class SubscribersRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        # Table creation is handled by init_db (alembic or create_all)
+
+    async def get_all(self) -> Set[str]:
+        """Retrieves all subscriber chat_ids."""
+        try:
+            result = await self.session.execute(select(Subscriber.chat_id))
+            return {row[0] for row in result.fetchall()}
+        except Exception as e:
+            logger.error(f"Error fetching subscribers: {e}")
+            return set()
+
+    async def add(self, chat_id: str) -> bool:
+        """Adds a subscriber. Returns True if added, False if already exists or error."""
+        try:
+            # Check if exists first to return correct boolean
+            # (or handling IntegrityError, but check is cleaner for boolean return)
+            exists = await self.exists(chat_id)
+            if exists:
+                return False
+            
+            new_sub = Subscriber(chat_id=chat_id)
+            self.session.add(new_sub)
+            await self.session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding subscriber {chat_id}: {e}")
+            await self.session.rollback()
+            return False
+
+    async def remove(self, chat_id: str) -> bool:
+        """Removes a subscriber. Returns True if removed/not found, False on error."""
+        try:
+            await self.session.execute(delete(Subscriber).where(Subscriber.chat_id == chat_id))
+            await self.session.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error removing subscriber {chat_id}: {e}")
+            await self.session.rollback()
+            return False
+
+    async def exists(self, chat_id: str) -> bool:
+        try:
+            result = await self.session.execute(select(Subscriber).where(Subscriber.chat_id == chat_id))
+            return result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.error(f"Error checking subscriber {chat_id}: {e}")
+            return False
+
+
+--------------------------------------------------------------------------------
+
+# app/services/analyzer.py
+
+import math
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Mexico City timezone offsets for traffic shaping
+# We use hour-of-day (0-23) in America/Mexico_City (UTC-6)
+TRAFFIC_MULTIPLIERS = {
+    # Off-peak: impressive gains with low traffic
+    range(0, 7): 1.5,
+    # Morning ramp-up
+    range(7, 9): 1.2,
+    # Peak hours: standard difficulty
+    range(9, 22): 1.0,
+    # Late night wind-down
+    range(22, 24): 1.3,
+}
+
+
+def _get_traffic_multiplier(hour: int) -> float:
+    """Returns traffic multiplier based on hour of day (Mexico City time)."""
+    for hour_range, multiplier in TRAFFIC_MULTIPLIERS.items():
+        if hour in hour_range:
+            return multiplier
+    return 1.0
+
+
+class AnalyzerService:
+    def __init__(self, system_config: Dict[str, float]):
+        self.config = system_config
+
+    def update_config(self, new_config: Dict[str, float]):
+        self.config = new_config
+
+    def is_deal_invalid(self, deal: Dict[str, Any]) -> bool:
+        """Check if deal is clearly invalid/expired."""
+        posted_text = deal.get("posted_text", "")
+        if "Expiró" in posted_text:
+            return True
+        return False
+
+    def calculate_viral_score(self, deal: Dict[str, Any]) -> float:
+        """
+        Gravity-based viral score similar to HackerNews ranking.
+        
+        Formula: (temp - 1) / (hours + offset)^gravity
+        
+        A deal with 50° in 10 minutes scores exponentially higher than 
+        one with 50° in 5 hours. The gravity parameter controls how 
+        aggressively we penalize aging deals.
+        """
+        temp = float(deal.get("temperature", 0))
+        
+        # Anti-noise gate: require minimum "seed capital"
+        min_seed = self.config.get("min_seed_temp", 15.0)
+        if temp < min_seed:
+            return 0.0
+
+        hours = float(deal.get("hours_since_posted", 0))
+        
+        # Small offset prevents division by zero for brand-new deals
+        # and gives ~6 min of grace period
+        offset = 0.1
+        
+        # Gravity: how aggressively time penalizes the score
+        # 1.2 = gentle (good for early detection)
+        # 1.8 = harsh (HackerNews standard, better for ranking established posts)
+        gravity = self.config.get("gravity", 1.2)
+        
+        score = (temp - 1) / pow(hours + offset, gravity)
+        return round(score, 2)
+
+    def calculate_acceleration(
+        self, 
+        current_temp: float, 
+        current_hours: float, 
+        prev_temp: Optional[float], 
+        prev_hours: Optional[float]
+    ) -> float:
+        """
+        Detects if the rate of temperature gain is increasing (2nd derivative).
+        
+        Compares velocity of the current snapshot vs the previous snapshot.
+        Returns a multiplier:
+          1.0 = steady growth
+          >1.0 = accelerating (votes coming in faster)
+          <1.0 = decelerating
+        
+        Capped between 0.5 and 3.0 to prevent outlier distortion.
+        """
+        if prev_temp is None or prev_hours is None:
+            return 1.0  # No previous data, assume steady
+        
+        # Time delta between snapshots
+        delta_hours = current_hours - prev_hours
+        if delta_hours <= 0.01:  # Less than ~36 seconds apart
+            return 1.0
+        
+        # Temperature gained in this interval
+        delta_temp = current_temp - prev_temp
+        if delta_temp <= 0:
+            return 0.5  # Temperature dropped or flat = decelerating
+        
+        # Current interval velocity (degrees per hour)
+        current_velocity = delta_temp / delta_hours
+        
+        # Overall average velocity up to previous snapshot
+        prev_minutes = max(1, prev_hours * 60)
+        prev_avg_velocity = prev_temp / prev_minutes  # deg/min for consistency
+        
+        if prev_avg_velocity <= 0:
+            return 1.5  # No prior velocity but gaining now = mildly accelerating
+        
+        # Convert current to same units (deg/min)
+        current_velocity_min = current_velocity / 60
+        
+        # Ratio: how much faster is the current interval vs historical average
+        ratio = current_velocity_min / prev_avg_velocity
+        
+        # Clamp to prevent noise from dominating
+        return max(0.5, min(3.0, ratio))
+
+    def get_current_mexico_hour(self) -> int:
+        """Returns current hour in Mexico City timezone (UTC-6)."""
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo("America/Mexico_City"))
+            return now.hour
+        except Exception:
+            # Fallback: assume UTC-6
+            from datetime import timezone, timedelta
+            utc_now = datetime.now(timezone.utc)
+            mx_now = utc_now + timedelta(hours=-6)
+            return mx_now.hour
+
+    def analyze_deal(
+        self, 
+        deal: Dict[str, Any], 
+        prev_snapshot: Optional[Tuple[float, float]] = None
+    ) -> Dict[str, Any]:
+        """
+        Full analysis pipeline for a deal.
+        
+        Returns a dict with:
+          - viral_score: raw gravity-based score
+          - acceleration: velocity change multiplier  
+          - traffic_mult: time-of-day bonus
+          - final_score: viral_score × traffic_mult × acceleration
+          - is_hot: whether final_score exceeds threshold
+          - rating: fire rating (1-4)
+        
+        prev_snapshot: Optional (temperature, hours_since_posted) from deal_history
+        """
+        if self.is_deal_invalid(deal):
+            return {
+                "viral_score": 0.0, "acceleration": 1.0, "traffic_mult": 1.0,
+                "final_score": 0.0, "is_hot": False, "rating": 0
+            }
+
+        temp = float(deal.get("temperature", 0))
+        hours = float(deal.get("hours_since_posted", 0))
+
+        # 1. Base viral score (gravity model)
+        viral_score = self.calculate_viral_score(deal)
+        
+        # 2. Acceleration bonus
+        prev_temp = prev_snapshot[0] if prev_snapshot else None
+        prev_hours = prev_snapshot[1] if prev_snapshot else None
+        acceleration = self.calculate_acceleration(temp, hours, prev_temp, prev_hours)
+        
+        # 3. Traffic shaping
+        mexico_hour = self.get_current_mexico_hour()
+        traffic_mult = _get_traffic_multiplier(mexico_hour)
+        
+        # 4. Final composite score
+        final_score = round(viral_score * traffic_mult * acceleration, 2)
+        
+        # 5. Hot detection
+        threshold = self.config.get("viral_threshold", 50.0)
+        is_hot = final_score >= threshold
+        
+        # 6. Rating tiers (score-based)
+        rating = self._score_to_rating(final_score)
+        
+        return {
+            "viral_score": viral_score,
+            "acceleration": round(acceleration, 2),
+            "traffic_mult": traffic_mult,
+            "final_score": final_score,
+            "is_hot": is_hot,
+            "rating": rating,
+        }
+
+    def _score_to_rating(self, score: float) -> int:
+        """Converts final score to fire rating (1-4)."""
+        tier4 = self.config.get("score_tier_4", 500.0)
+        tier3 = self.config.get("score_tier_3", 200.0)
+        tier2 = self.config.get("score_tier_2", 100.0)
+        
+        if score >= tier4:
+            return 4
+        elif score >= tier3:
+            return 3
+        elif score >= tier2:
+            return 2
+        elif score > 0:
+            return 1
+        return 0
+
+    # --- Legacy compatibility methods ---
+
+    def is_deal_hot(self, deal: Dict[str, Any], prev_snapshot: Optional[Tuple[float, float]] = None) -> bool:
+        """Legacy-compatible hot check. Now delegates to analyze_deal."""
+        result = self.analyze_deal(deal, prev_snapshot)
+        return result["is_hot"]
+
+    def calculate_rating(self, deal: Dict[str, Any], prev_snapshot: Optional[Tuple[float, float]] = None) -> int:
+        """Legacy-compatible rating. Now delegates to analyze_deal."""
+        result = self.analyze_deal(deal, prev_snapshot)
+        return result["rating"]
+
+
+--------------------------------------------------------------------------------
+
+# app/services/deals.py
+
+import logging
+from typing import Dict, Any, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.repositories.deals import DealsRepository
+
+logger = logging.getLogger(__name__)
+
+class DealsService:
+    def __init__(self, deals_repository: DealsRepository):
+        self.deals_repo = deals_repository
+        self.session = deals_repository.session
+
+    async def process_new_deal(self, deal_data: Dict[str, Any], viral_score: float = 0.0) -> Optional[int]:
+        """
+        Atomically saves a deal and its initial history.
+        Implements Unit of Work pattern: saves both or neither.
+        Returns deal_id if successful, None otherwise.
+        """
+        if not deal_data.get("url"):
+            return None
+
+        try:
+            # 1. Save Deal
+            deal_id = await self.deals_repo.save_deal(deal_data)
+            
+            if not deal_id:
+                raise Exception(f"Failed to get deal ID for {deal_data.get('url')}")
+
+            # 2. Save Initial History (with viral_score)
+            history_saved = await self.deals_repo.save_history(
+                deal_id, deal_data, source="hunter", viral_score=viral_score
+            )
+            
+            if not history_saved:
+                 raise Exception(f"Failed to save history for deal {deal_id}")
+
+            # 3. Atomic Commit
+            await self.session.commit()
+            return deal_id
+
+        except Exception as e:
+            logger.error(f"Transaction failed for deal {deal_data.get('url')}: {e}")
+            await self.session.rollback()
+            return None
+
+
+--------------------------------------------------------------------------------
+
+# app/services/optimizer.py
+
+import logging
+from typing import Dict, Any
+from app.repositories.deals import DealsRepository
+
+logger = logging.getLogger(__name__)
+
+class AutoTunerService:
+    def __init__(self, deals_repository: DealsRepository):
+        self.deals_repo = deals_repository
+
+    async def _safe_query(self, coro, label: str, default=None):
+        """Wraps a query in a SAVEPOINT so failures don't poison the transaction."""
+        try:
+            nested = await self.deals_repo.session.begin_nested()
+            result = await coro
+            await nested.commit()
+            return result
+        except Exception as e:
+            await nested.rollback()
+            logger.warning(f"⚠️ {label}: Query failed (non-fatal): {e}")
+            return default
+
+    async def optimize(self):
+        logger.info("🧠 Iniciando ciclo de optimización (AutoTuner v2 — Viral Score Engine)...")
+        
+        try:
+            new_config = {}
+
+            # --- 1. LEGACY: Velocity Percentiles (backwards compatible) ---
+            p20_15m = await self._safe_query(
+                self.deals_repo.get_velocity_percentile(min_temp=200, hours_window=0.25, percentile=0.2),
+                "Velocity P20 <15m", default=0.0
+            )
+            if p20_15m > 0:
+                new_config["velocity_instant_kill"] = round(max(1.0, min(5.0, p20_15m)), 2)
+                logger.info(f"📊 Legacy <15m: P20={p20_15m:.2f} -> velocity_instant_kill: {new_config['velocity_instant_kill']}")
+
+            p20_30m = await self._safe_query(
+                self.deals_repo.get_velocity_percentile(min_temp=100, hours_window=0.5, percentile=0.2),
+                "Velocity P20 <30m", default=0.0
+            )
+            if p20_30m > 0:
+                new_config["velocity_fast_rising"] = round(max(0.5, min(3.0, p20_30m)), 2)
+                logger.info(f"📊 Legacy <30m: P20={p20_30m:.2f} -> velocity_fast_rising: {new_config['velocity_fast_rising']}")
+
+            # --- 2. NEW: Viral Score Threshold ---
+            viral_p20 = await self._safe_query(
+                self.deals_repo.get_viral_score_percentile(
+                    min_final_temp=200, hours_window=1.0, percentile=0.2
+                ),
+                "Viral Score P20", default=0.0
+            )
+            if viral_p20 > 0:
+                suggested_threshold = round(max(10.0, min(500.0, viral_p20)), 2)
+                new_config["viral_threshold"] = suggested_threshold
+                logger.info(f"🧬 Viral Score P20 (winners 200°+, <1h): {viral_p20:.2f} -> viral_threshold: {suggested_threshold}")
+            else:
+                logger.info("🧬 Insufficient viral_score data for threshold tuning. Using defaults.")
+
+            # --- 3. GOLDEN RATIO ANALYSIS (Observability) ---
+            checkpoints = [
+                (0.25, 20, 200, "15min/20°→200°"),
+                (0.25, 30, 500, "15min/30°→500°"),
+                (0.5, 30, 200, "30min/30°→200°"),
+                (0.5, 50, 500, "30min/50°→500°"),
+                (1.0, 50, 200, "1h/50°→200°"),
+            ]
+            
+            for checkpoint_hours, min_temp, success_temp, label in checkpoints:
+                stats = await self._safe_query(
+                    self.deals_repo.get_golden_ratio_stats(
+                        checkpoint_hours=checkpoint_hours,
+                        min_temp_at_checkpoint=min_temp,
+                        success_temp=success_temp
+                    ),
+                    f"Golden Ratio [{label}]",
+                    default={"sample_size": 0, "successes": 0, "probability": 0.0}
+                )
+                if stats["sample_size"] >= 5:
+                    logger.info(
+                        f"🎯 Golden Ratio [{label}]: "
+                        f"{stats['probability']:.1f}% success "
+                        f"({stats['successes']}/{stats['sample_size']} deals)"
+                    )
+                else:
+                    logger.debug(f"🎯 Golden Ratio [{label}]: Insufficient data ({stats['sample_size']} samples)")
+
+            # --- 4. UPDATE DB ---
+            if new_config:
+                logger.info(f"💾 Actualizando configuración en BD: {new_config}")
+                success = await self.deals_repo.update_system_config_bulk(new_config)
+                if success:
+                    await self.deals_repo.session.commit()
+                    logger.info("✅ Configuración optimizada exitosamente.")
+            else:
+                logger.info("⏹ No hay cambios suficientes para aplicar.")
+
+        except Exception as e:
+            logger.error(f"Error en proceso de optimización: {e}")
+
+
+--------------------------------------------------------------------------------
+
+# app/services/scheduler.py
+
+
+import asyncio
+import logging
+import random
+import time
+from typing import List
+from sqlalchemy import select, func, text
+from sqlalchemy.orm import selectinload
+
+from app.core.config import settings
+from app.db.session import async_session_factory
+from app.repositories.deals import DealsRepository
+from app.repositories.subscribers import SubscribersRepository
+from app.services.scraper import ScraperService
+from app.services.analyzer import AnalyzerService
+from app.services.deals import DealsService
+from app.services.telegram import TelegramService
+from app.models.deals import Deal, DealOutcome
+
+logger = logging.getLogger(__name__)
+
+class SchedulerService:
+    def __init__(self, scraper_service: ScraperService, telegram_service: TelegramService):
+        self.scraper = scraper_service
+        self.telegram = telegram_service
+        self.shutdown_event = asyncio.Event()
+        self.tasks = []
+        
+        # Analyzer (global instance, config updated periodically)
+        self.analyzer = AnalyzerService({})
+
+    async def start(self):
+        """Starts all background loops."""
+        logger.info("SchedulerService starting...")
+        
+        # Load initial config
+        try:
+            async with async_session_factory() as session:
+                deals_repo = DealsRepository(session)
+                config = await deals_repo.get_system_config()
+                self.analyzer.update_config(config)
+        except Exception as e:
+            logger.error(f"Failed to load initial config: {e}")
+
+        # Launch tasks
+        self.tasks.append(asyncio.create_task(self.run_hunter()))
+        self.tasks.append(asyncio.create_task(self.run_tracker()))
+        self.tasks.append(asyncio.create_task(self.run_historian()))
+        logger.info(f"SchedulerService started with {len(self.tasks)} loops.")
+
+    async def stop(self):
+        """Signals all loops to stop and waits for them."""
+        logger.info("SchedulerService stopping...")
+        self.shutdown_event.set()
+        
+        for t in self.tasks:
+            t.cancel()
+        
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        logger.info("SchedulerService stopped.")
+
+    # --- 1. THE HUNTER (Finds new deals) ---
+    async def run_hunter(self):
+        """Scrapes /nuevas every 5-10 minutes."""
+        logger.info("🏹 Hunter loop started.")
+        while not self.shutdown_event.is_set():
+            try:
+                logger.info("🏹 Hunter: Scanning /nuevas ...")
+                async with async_session_factory() as session:
+                    deals_repo = DealsRepository(session)
+                    sub_repo = SubscribersRepository(session)
+                    deals_service = DealsService(deals_repo)
+                    
+                    html = await self.scraper.fetch_page("https://www.promodescuentos.com/nuevas")
+                    if html:
+                        deals = await asyncio.to_thread(self.scraper.parse_deals, html)
+                        
+                        # Batch get snapshots
+                        urls = [d["url"] for d in deals if d.get("url")]
+                        snapshots = await deals_repo.get_latest_snapshots_batch(urls)
+                        
+                        count = 0
+                        for deal_data in deals:
+                            url = deal_data.get("url")
+                            if not url: continue
+                            
+                            # Analyze
+                            prev_snap = snapshots.get(url)
+                            analysis = self.analyzer.analyze_deal(deal_data, prev_snap)
+                            
+                            # Process & Save
+                            deal_id = await deals_service.process_new_deal(deal_data, viral_score=analysis["final_score"])
+                            
+                            # Notify if Viral
+                            if analysis["is_hot"] and deal_id:
+                                await self._handle_viral_deal(deal_data, analysis, deals_repo, sub_repo)
+                                count += 1
+                        
+                        logger.info(f"🏹 Hunter: Processed {len(deals)} items. {count} viral.")
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"🏹 Hunter Error: {e}")
+
+            # Wait 5-10 mins
+            if not self.shutdown_event.is_set():
+                await self._sleep(random.randint(300, 600))
+
+    # --- 2. THE TRACKER (Updates active deals) ---
+    async def run_tracker(self):
+        """Updates active deals every 15-30 minutes."""
+        logger.info("👀 Tracker loop started.")
+        while not self.shutdown_event.is_set():
+            try:
+                async with async_session_factory() as session:
+                    # Select deals: Active, Created < 24h ago
+                    query = select(Deal).options(selectinload(Deal.history)).where(
+                        Deal.is_active == 1,
+                        Deal.created_at >= func.now() - text("INTERVAL '24 HOURS'")
+                    ).order_by(Deal.last_tracked_at.asc()).limit(10) # Process batch of 10
+                    
+                    result = await session.execute(query)
+                    active_deals = result.scalars().all()
+                    
+                    if not active_deals:
+                         logger.info("👀 Tracker: No active deals to track.")
+                         await self._sleep(300)
+                         continue
+
+                    logger.info(f"👀 Tracker: Tracking {len(active_deals)} active deals...")
+                    
+                    deals_service = DealsService(DealsRepository(session))
+                    
+                    for deal in active_deals:
+                         if self.shutdown_event.is_set(): break
+                         
+                         html = await self.scraper.fetch_page(deal.url)
+                         if html:
+                             details = await asyncio.to_thread(self.scraper.parse_deal_detail, html)
+                             if details:
+                                 # Update logic
+                                 if details.get("is_expired") or details.get("status") != "Activated":
+                                     deal.is_active = 0
+                                     deal.activity_status = "expired"
+                                     logger.info(f"👀 Tracker: Deal {deal.id} expired.")
+                                 
+                                 # Update temperature/price in history
+                                 # Calculate hours_since_posted
+                                 hours_since_posted = deal.history[-1].hours_since_posted if deal.history else 0 # Fallback
+                                 if details.get("published_at"):
+                                     hours_since_posted = (time.time() - float(details["published_at"])) / 3600
+                                 elif deal.created_at: 
+                                      # Rough estimate if published_at missing (though Deal usually parses it)
+                                      # Note: created_at is naive or timezone aware? SQLAlchemy usually returns datetime
+                                      # Let's trust scraper data mostly.
+                                      pass
+
+                                 details["hours_since_posted"] = hours_since_posted
+
+                                 await deals_repo.save_history(
+                                     deal.id, 
+                                     details,
+                                     source="tracker"
+                                 )
+                                 
+                                 deal.last_tracked_at = func.now()
+                                 await session.commit()
+                             else:
+                                 logger.warning(f"👀 Tracker: Could not parse {deal.url}")
+                         
+                         # Short sleep between items to be nice
+                         await asyncio.sleep(random.uniform(2, 5))
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"👀 Tracker Error: {e}")
+
+            # Wait 15-30 mins between BATCHES (or less if we have many deals? For now keep it simple)
+            # Better: run continuously but sleep if empty.
+            if not self.shutdown_event.is_set():
+                await self._sleep(random.randint(60, 120)) # check relatively often for next batch
+
+    # --- 3. THE HISTORIAN (Long-term trends) ---
+    async def run_historian(self):
+        """Scrapes /las-mas-hot every 2-4 hours."""
+        logger.info("📜 Historian loop started.")
+        while not self.shutdown_event.is_set():
+            try:
+                logger.info("📜 Historian: Archiving /las-mas-hot ...")
+                async with async_session_factory() as session:
+                     deals_repo = DealsRepository(session)
+                     
+                     html = await self.scraper.fetch_page("https://www.promodescuentos.com/las-mas-hot")
+                     if html:
+                         deals = await asyncio.to_thread(self.scraper.parse_hot_page, html)
+                         
+                         for d in deals:
+                             url = d.get("url")
+                             if not url: continue
+                             
+                             deal = await deals_repo.get_by_url(url)
+                             if deal:
+                                 # Update Outcome
+                                 outcome = await deals_repo.get_outcome(deal.id)
+                                 if not outcome:
+                                     outcome = DealOutcome(deal_id=deal.id)
+                                     session.add(outcome)
+                                 
+                                 temp = float(d.get("temperature", 0))
+                                 current_max = outcome.final_max_temp if outcome.final_max_temp is not None else 0.0
+                                 
+                                 if temp > current_max:
+                                     outcome.final_max_temp = temp
+                                 
+                                 if temp >= 200: outcome.reached_200 = 1
+                                 if temp >= 500: outcome.reached_500 = 1
+                                 if temp >= 1000: outcome.reached_1000 = 1
+                                 
+                                 await session.commit()
+                         
+                         logger.info(f"📜 Historian: Analyzed {len(deals)} hot deals.")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"📜 Historian Error: {e}")
+
+            if not self.shutdown_event.is_set():
+                await self._sleep(random.randint(7200, 14400)) # 2-4 hours
+
+    # --- Helpers ---
+    async def _handle_viral_deal(self, deal: dict, analysis: dict, deals_repo: DealsRepository, sub_repo: SubscribersRepository):
+        curr_rating = analysis["rating"]
+        url = deal.get("url")
+        title = deal.get("title")
+        
+        if not url: return
+
+        max_rating = await deals_repo.get_max_rating(url)
+        
+        if curr_rating > max_rating:
+            logger.info(
+                f"🔥 {title} is HOT ({curr_rating})! "
+                f"Score: {analysis['final_score']:.1f}"
+            )
+            
+            subs = await sub_repo.get_all()
+            targets = set(subs)
+            if settings.ADMIN_CHAT_IDS: targets.update(settings.ADMIN_CHAT_IDS)
+            
+            await deals_repo.update_max_rating(url, curr_rating)
+            await self.telegram.send_bulk_notifications(targets, {"title": title, "url": url, "price_display": f"${analysis.get('price', 0)}", "rating": curr_rating})
+
+    async def _sleep(self, seconds: int):
+        try:
+             await asyncio.wait_for(self.shutdown_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
+--------------------------------------------------------------------------------
+
+# app/services/scraper.py
+
+import httpx
+import logging
+import json
+import time
+import re
+import os
+import random
+import asyncio
+from bs4 import BeautifulSoup
+from typing import List, Dict, Any, Optional
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+class ScraperService:
+    def __init__(self):
+        self.client: Optional[httpx.AsyncClient] = None
+
+    async def startup(self):
+        """Initializes the persistent HTTP client."""
+        if self.client is None:
+            self.client = httpx.AsyncClient(
+                timeout=20.0, 
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            )
+            logger.info("ScraperService HTTP client initialized.")
+
+    async def close(self):
+        """Closes the persistent HTTP client."""
+        if self.client:
+            await self.client.aclose()
+            self.client = None
+            logger.info("ScraperService HTTP client closed.")
+
+    def _get_random_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "es-MX,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+
+    async def fetch_page(self, url: str) -> Optional[str]:
+        if self.client is None:
+            await self.startup()
+            
+        max_retries = 3
+        backoff_factor = 2
+        
+        for attempt in range(max_retries):
+            try:
+                headers = self._get_random_headers() # Rotate on each request
+                logger.info(f"Fetching {url} (Attempt {attempt+1}/{max_retries})...")
+                
+                response = await self.client.get(url, headers=headers)
+                
+                if response.status_code == 200:
+                    return response.text
+                
+                elif 400 <= response.status_code < 500:
+                        logger.error(f"Client error {response.status_code} fetching {url}. Not retrying.")
+                        return None
+                else:
+                    logger.warning(f"Server error {response.status_code} fetching {url}.")
+            
+            except httpx.RequestError as e:
+                logger.warning(f"Network error fetching {url}: {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error fetching {url}: {e}")
+                return None
+
+            # Exponential backoff if not last attempt
+            if attempt < max_retries - 1:
+                sleep_time = backoff_factor ** attempt + random.uniform(0, 1)
+                logger.info(f"Retrying in {sleep_time:.2f}s...")
+                await asyncio.sleep(sleep_time)
+
+        logger.error(f"Max retries reached for {url}.")
+        return None
+
+    def _save_debug_html(self, content: str, suffix: str):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        filename = f"{settings.DEBUG_DIR}/debug_html_{suffix}_{timestamp}.html"
+        os.makedirs(settings.DEBUG_DIR, exist_ok=True)
+        try:
+             with open(filename, "w", encoding="utf-8") as f:
+                 f.write(content)
+        except Exception as e:
+             logger.error(f"Could not save debug file: {e}")
+
+    def parse_deals(self, html_content: str) -> List[Dict[str, Any]]:
+        soup = BeautifulSoup(html_content, "html.parser")
+        articles = soup.select("article.thread")
+        logger.info(f"Found {len(articles)} articles.")
+        
+        deals = []
+        processed_urls = set()
+
+        for art in articles:
+            deal = self._extract_deal_info(art)
+            if deal and deal.get("url") and deal["url"] not in processed_urls:
+                processed_urls.add(deal["url"])
+                deals.append(deal)
+        
+        return deals
+
+    def _extract_deal_info(self, art: BeautifulSoup) -> Dict[str, Any]:
+        deal_info = {}
+        
+        # --- 1. Vue Data Extraction Strategy ---
+        vue_data = {}
+        try:
+            vue_elems = art.select("div.js-vue3[data-vue3]")
+            for el in vue_elems:
+                try:
+                    data = json.loads(el.get("data-vue3", "{}"))
+                    if data.get("name") == "ThreadMainListItemNormalizer":
+                        vue_data = data.get("props", {}).get("thread", {})
+                        break
+                except: pass
+        except Exception as e:
+            logger.error(f"Error extracting Vue data: {e}")
+
+        # --- 2. Title & URL ---
+        try:
+            if vue_data:
+                deal_info["title"] = vue_data.get("title")
+                if vue_data.get("titleSlug") and vue_data.get("threadId"):
+                    deal_info["url"] = f"https://www.promodescuentos.com/ofertas/{vue_data['titleSlug']}-{vue_data['threadId']}"
+                else:
+                     deal_info["url"] = vue_data.get("shareableLink") or vue_data.get("link")
+            else:
+                # Fallback HTML
+                title_el = art.select_one("strong.thread-title a, a.thread-link")
+                if not title_el: return {}
+                deal_info["title"] = title_el.get_text(strip=True)
+                link = title_el.get("href", "")
+                if link.startswith("/"): link = "https://www.promodescuentos.com" + link
+                deal_info["url"] = link
+        except Exception as e:
+            logger.error(f"Error extracting Title/URL: {e}")
+            return {}
+
+        # --- 3. Merchant ---
+        deal_info["merchant"] = "N/D"
+        try:
+            if vue_data and vue_data.get("merchant"):
+                 m = vue_data["merchant"]
+                 if isinstance(m, dict):
+                     # Fix: JSON uses 'merchantName', not 'name'
+                     deal_info["merchant"] = m.get("merchantName") or m.get("name") or "N/D"
+                 else:
+                     deal_info["merchant"] = str(m)
+            elif vue_data and vue_data.get("merchantName"):
+                 deal_info["merchant"] = vue_data.get("merchantName")
+            else:
+                # HTML Fallback
+                merchant_el = art.select_one('a[data-t="merchantLink"], span.thread-merchant')
+                if merchant_el:
+                    deal_info["merchant"] = merchant_el.get_text(strip=True).replace("Disponible en", "").strip()
+            
+            # Final Fallback: Extract from title (e.g. "Amazon: Product")
+            if deal_info["merchant"] == "N/D" and deal_info.get("title"):
+                parts = deal_info["title"].split(":", 1)
+                if len(parts) > 1 and len(parts[0]) < 20: # Heuristic for merchant name length
+                    deal_info["merchant"] = parts[0].strip()
+        except Exception as e:
+            logger.debug(f"Error extracting Merchant: {e}")
+
+        # --- 4. Price ---
+        deal_info["price_display"] = None
+        try:
+            if vue_data and "price" in vue_data:
+                 try:
+                     price_val = float(vue_data["price"])
+                     deal_info["price_display"] = f"${price_val:,.2f}" if price_val > 0 else "Gratis"
+                 except: 
+                     deal_info["price_display"] = vue_data.get("priceDisplay")
+            
+            if not deal_info["price_display"]:
+                 # HTML Fallback
+                 price_el = art.select_one(".thread-price")
+                 if price_el:
+                     deal_info["price_display"] = price_el.get_text(strip=True)
+        except Exception as e:
+            logger.debug(f"Error extracting Price: {e}")
+
+        # --- 5. Discount ---
+        deal_info["discount_percentage"] = vue_data.get("discountPercentage")
+        try:
+            if not deal_info["discount_percentage"]:
+                 discount_el = art.select_one(".thread-discount, .textBadge--green")
+                 if discount_el:
+                     txt = discount_el.get_text(strip=True)
+                     if "%" in txt: deal_info["discount_percentage"] = txt
+        except Exception as e:
+            logger.debug(f"Error extracting Discount: {e}")
+
+        # --- 6. Image ---
+        deal_info["image_url"] = None
+        try:
+            if vue_data:
+                main_image = vue_data.get("mainImage", {})
+                if isinstance(main_image, dict):
+                    path = main_image.get("path")
+                    name = main_image.get("name")
+                    if path and name:
+                        deal_info["image_url"] = f"https://static.promodescuentos.com/{path}/{name}.jpg"
+            
+            if not deal_info["image_url"]:
+                 img_el = art.select_one("img.thread-image")
+                 if img_el:
+                     deal_info["image_url"] = img_el.get("data-src") or img_el.get("src")
+                     if deal_info["image_url"] and deal_info["image_url"].startswith("//"):
+                         deal_info["image_url"] = "https:" + deal_info["image_url"]
+        except Exception as e:
+            logger.debug(f"Error extracting Image: {e}")
+        
+        # --- 7. Coupon ---
+        deal_info["coupon_code"] = vue_data.get("voucherCode")
+        try:
+            if not deal_info["coupon_code"]:
+                 coupon_el = art.select_one(".voucher .buttonWithCode-code")
+                 if coupon_el: deal_info["coupon_code"] = coupon_el.get_text(strip=True)
+        except Exception as e:
+            logger.debug(f"Error extracting Coupon: {e}")
+
+        # --- 8. Description ---
+        try:
+            # Try to get from HTML usually best for summary
+            desc_el = art.select_one(".thread-description .userHtml-content, .userHtml.userHtml-content div")
+            if desc_el:
+                desc = desc_el.get_text(strip=True, separator=' ')
+                deal_info["description"] = desc[:280].strip() + "..." if len(desc) > 280 else desc
+            else:
+                 deal_info["description"] = "No disponible"
+        except Exception as e:
+             deal_info["description"] = "No disponible"
+
+        # --- 9. Temperature ---
+        deal_info["temperature"] = 0
+        try:
+            if vue_data:
+                deal_info["temperature"] = float(vue_data.get("temperature", 0))
+            else:
+                temp_el = art.select_one(".vote-temp")
+                if temp_el:
+                    txt = temp_el.get_text(strip=True).replace("°", "").strip()
+                    deal_info["temperature"] = float(txt)
+        except Exception as e:
+            logger.debug(f"Error extracting Temperature: {e}")
+
+        # --- 10. Time ---
+        deal_info["hours_since_posted"] = 999.0
+        deal_info["posted_or_updated"] = "Publicado"
+        try:
+             if vue_data and vue_data.get("publishedAt"):
+                 pub_at = int(vue_data["publishedAt"])
+                 if vue_data.get("threadUpdates"):
+                     deal_info["posted_or_updated"] = "Actualizado"
+                 
+                 diff = time.time() - pub_at
+                 deal_info["hours_since_posted"] = diff / 3600
+             else:
+                 # HTML Fallback for time
+                 time_el = art.select_one("span.chip span.size--all-s")
+                 if time_el:
+                     posted_txt = time_el.get_text(strip=True).lower()
+                     if "actualizado" in posted_txt: deal_info["posted_or_updated"] = "Actualizado"
+                     
+                     # Simple regex parsing
+                     if "min" in posted_txt or "m" in posted_txt.split():
+                         m = re.search(r"(\d+)", posted_txt)
+                         if m: deal_info["hours_since_posted"] = int(m.group(1)) / 60.0
+                     elif "h" in posted_txt:
+                         m = re.search(r"(\d+)", posted_txt)
+                         if m: deal_info["hours_since_posted"] = float(m.group(1))
+        except Exception as e:
+             logger.debug(f"Error extracting Time: {e}")
+        
+        # Posted Text (for 'Expiró' check) -> HTML always
+        try:
+            meta_div = art.select_one(".thread-meta")
+            if meta_div:
+                 deal_info["posted_text"] = meta_div.get_text(strip=True)
+        except Exception as e: pass
+
+        return deal_info
+
+    def parse_deal_detail(self, html_content: str) -> Dict[str, Any]:
+        """
+        Parses a specific deal detail page using the global window.__INITIAL_STATE__ object.
+        This provides more reliable data than DOM scraping for detail pages.
+        """
+        data = {}
+        try:
+            # Extract JSON state
+            match = re.search(r"window\.__INITIAL_STATE__\s*=\s*({.*?});", html_content, re.DOTALL)
+            if not match:
+                logger.warning("Could not find window.__INITIAL_STATE__ in deal detail page.")
+                return {}
+            
+            state = json.loads(match.group(1))
+            thread_detail = state.get("threadDetail", {})
+            
+            if not thread_detail:
+                logger.warning("No 'threadDetail' found in initial state.")
+                return {}
+
+            # Basic Info
+            data["thread_id"] = thread_detail.get("threadId")
+            data["title"] = thread_detail.get("title")
+            data["url"] = thread_detail.get("url") or thread_detail.get("shareableLink")
+            data["price"] = thread_detail.get("price")
+            data["temperature"] = thread_detail.get("temperature")
+            data["description"] = thread_detail.get("descriptionPurified")
+            
+            # Status
+            data["is_expired"] = thread_detail.get("isExpired", False)
+            data["status"] = thread_detail.get("status") # e.g. "Activated"
+            data["is_active"] = not data["is_expired"] and data["status"] == "Activated"
+
+            # Times
+            data["published_at"] = thread_detail.get("publishedAt")
+            data["updated_at"] = thread_detail.get("updatedAt")
+
+            # Image
+            main_image = thread_detail.get("mainImage", {})
+            if main_image and main_image.get("path") and main_image.get("name"):
+                 data["image_url"] = f"https://static.promodescuentos.com/{main_image['path']}/{main_image['name']}.jpg"
+
+            # Merchant
+            merchant = thread_detail.get("merchant")
+            if merchant and isinstance(merchant, dict):
+                 data["merchant"] = merchant.get("merchantName") or merchant.get("name")
+            
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON state: {e}")
+        except Exception as e:
+            logger.error(f"Error parsing detail page: {e}")
+        
+        return data
+
+    def parse_hot_page(self, html_content: str) -> List[Dict[str, Any]]:
+        """
+        Parses the 'Las más hot' page. Currently reuses parse_deals as the structure is similar.
+        """
+        return self.parse_deals(html_content)
+
+
+--------------------------------------------------------------------------------
+
+# app/services/telegram.py
+
+import httpx
+import logging
+import json
+import asyncio
+from typing import Dict, Any, Optional, Set
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+class TelegramService:
+    def __init__(self):
+        self.base_url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}"
+        self.client = httpx.AsyncClient(timeout=20.0)
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def send_message(self, chat_id: str, text: str = None, deal_data: Dict[str, Any] = None) -> bool:
+        """
+        Envía un mensaje a Telegram. Puede ser un mensaje de oferta (deal_data)
+        o un mensaje de texto simple (text).
+        """
+        if not chat_id:
+            logger.warning("target_chat_id vacío, mensaje no enviado.")
+            return False
+
+        try:
+            payload: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            url_api_path = "/sendMessage"
+
+            if text:
+                payload["text"] = text
+                payload.pop("disable_web_page_preview", None)
+            
+            elif deal_data:
+                self._prepare_deal_payload(deal_data, payload)
+                if "photo" in payload:
+                    url_api_path = "/sendPhoto"
+            else:
+                logger.warning("send_message llamado sin deal_data ni text.")
+                return False
+
+            url_api = f"{self.base_url}{url_api_path}"
+            
+            response = await self.client.post(url_api, json=payload)
+            response.raise_for_status()
+            logger.info(f"Mensaje Telegram enviado a: {chat_id}")
+            # await asyncio.sleep(1) # Removed for bulk optimization
+            return True
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Error en API de Telegram para {chat_id}: {e}")
+            logger.error(f"Respuesta API Telegram: {e.response.text}")
+            return False
+        except Exception as e:
+            logger.exception(f"Excepción envíando a {chat_id}: {e}")
+            return False
+
+    async def send_bulk_notifications(self, chat_ids: Set[str], deal_data: Dict[str, Any]):
+        """
+        Envía notificaciones a múltiples usuarios de forma concurrente pero controlada.
+        """
+        if not chat_ids:
+            return
+
+        semaphore = asyncio.Semaphore(10) # Limit concurrent requests to prevent 429s
+
+        async def _bounded_send(chat_id):
+            async with semaphore:
+                try:
+                    await self.send_message(chat_id, deal_data=deal_data)
+                except Exception as e:
+                    logger.error(f"Error enviando bulk a {chat_id}: {e}")
+
+        logger.info(f"Iniciando envío masivo a {len(chat_ids)} usuarios...")
+        start_time = asyncio.get_running_loop().time()
+        
+        tasks = [_bounded_send(chat_id) for chat_id in chat_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        duration = asyncio.get_running_loop().time() - start_time
+        logger.info(f"Envío masivo completado en {duration:.2f}s")
+
+    def _prepare_deal_payload(self, deal_data: Dict[str, Any], payload: Dict[str, Any]):
+        """Helper to formatting deal message."""
+        rating = deal_data.get('rating', 0) # Calculated by AnalyzerService usually
+        # If rating is not present, we might want to calculate or pass it. 
+        # Assuming AnalyzerService enriched the dict or we calculate simply here?
+        # Let's rely on enriched data or defaults.
+        
+        emoji = "🔥" * rating
+        hours_posted = float(deal_data.get('hours_since_posted', 0))
+        
+        if hours_posted >= 1:
+            time_ago_text = f"{round(hours_posted)} horas" if hours_posted >= 1.5 else "1 hora"
+        else:
+            minutes = round(hours_posted * 60)
+            time_ago_text = f"{minutes} minutos" if minutes > 1 else "1 minuto"
+
+        price = deal_data.get('price_display')
+        price_text = f"<b>Precio:</b> {price}" if price and price != "N/D" else ""
+        
+        discount = deal_data.get('discount_percentage')
+        discount_text = f"<b>Descuento:</b> {discount}" if discount else ""
+        
+        coupon = deal_data.get('coupon_code')
+        if coupon:
+            coupon_safe = coupon.replace('<', '&lt;').replace('>', '&gt;')
+            coupon_text = f"<b>Cupón:</b> <code>{coupon_safe}</code>"
+        else:
+            coupon_text = ""
+
+        opt_lines = "\n".join(filter(None, [price_text, discount_text, coupon_text]))
+        if opt_lines: opt_lines = "\n" + opt_lines
+
+        title = str(deal_data.get('title', '')).replace('<', '&lt;').replace('>', '&gt;')
+        desc = str(deal_data.get('description', '')).replace('<', '&lt;').replace('>', '&gt;')
+        merchant = str(deal_data.get('merchant') or 'N/D').replace('<', '&lt;').replace('>', '&gt;')
+        temp = float(deal_data.get('temperature', 0))
+
+        message_content = f"""
+<b>{title}</b>
+
+<b>Calificación:</b> {temp:.0f}° {emoji}
+<b>{deal_data.get('posted_or_updated', 'Publicado')} hace:</b> {time_ago_text}
+<b>Comercio:</b> {merchant}
+{opt_lines}
+
+<b>Descripción:</b>
+{desc}
+        """.strip()
+
+        deal_url = deal_data.get('url', '')
+        if deal_url:
+            reply_markup = {
+                "inline_keyboard": [[{"text": "Ver Oferta", "url": deal_url}]]
+            }
+            payload["reply_markup"] = json.dumps(reply_markup)
+
+        image_url = deal_data.get('image_url', '')
+        if image_url and isinstance(image_url, str) and image_url.startswith(('http', 'https')):
+            payload["photo"] = image_url
+            payload["caption"] = message_content
+            if len(message_content) > 1024:
+                payload["caption"] = message_content[:1020] + "..."
+        else:
+            payload["text"] = message_content
+            if len(message_content) > 4096:
+                payload["text"] = message_content[:4092] + "..."
+
+
+--------------------------------------------------------------------------------
+
+# scripts/init_db.py
+
+
+import asyncio
+import sys
+import os
+import logging
+
+# Add project root to path
+sys.path.append(os.getcwd())
+
+from app.core.logging_config import setup_logging
+from app.main import init_db_content
+from app.db.session import engine
+from app.models.base import Base
+
+setup_logging()
+logger = logging.getLogger(__name__)
+
+async def main():
+    logger.info("Starting manual database initialization...")
+    
+    # 1. Create Tables (Base.metadata.create_all)
+    # This handles tables defined in models (like Deal, DealHistory, DealOutcome)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Tables created (if not existed).")
+    except Exception as e:
+        logger.error(f"Error creating tables: {e}")
+
+    # 2. Run specific SQL migrations/seeds from init_db_content
+    await init_db_content()
+    
+    await engine.dispose()
+    logger.info("DB Initialization complete.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+--------------------------------------------------------------------------------
+

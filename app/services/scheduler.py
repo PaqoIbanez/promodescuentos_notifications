@@ -7,12 +7,14 @@ from typing import List
 from sqlalchemy import select, func, text
 from sqlalchemy.orm import selectinload
 
+
 from app.core.config import settings
 from app.db.session import async_session_factory
 from app.repositories.deals import DealsRepository
 from app.repositories.subscribers import SubscribersRepository
 from app.services.scraper import ScraperService
 from app.services.analyzer import AnalyzerService
+from app.services.optimizer import AutoTunerService
 from app.services.deals import DealsService
 from app.services.telegram import TelegramService
 from app.models.deals import Deal, DealOutcome
@@ -46,6 +48,7 @@ class SchedulerService:
         self.tasks.append(asyncio.create_task(self.run_hunter()))
         self.tasks.append(asyncio.create_task(self.run_tracker()))
         self.tasks.append(asyncio.create_task(self.run_historian()))
+        self.tasks.append(asyncio.create_task(self.run_autotuner()))
         logger.info(f"SchedulerService started with {len(self.tasks)} loops.")
 
     async def stop(self):
@@ -196,18 +199,28 @@ class SchedulerService:
                      html = await self.scraper.fetch_page("https://www.promodescuentos.com/las-mas-hot")
                      if html:
                          deals = await asyncio.to_thread(self.scraper.parse_hot_page, html)
+                         logger.info(f"📜 Historian: Parsed {len(deals)} deals from /las-mas-hot")
+                         
+                         outcomes_updated = 0
+                         outcomes_created = 0
                          
                          for d in deals:
                              url = d.get("url")
                              if not url: continue
                              
-                             deal = await deals_repo.get_by_url(url)
-                             if deal:
+                             try:
+                                 deal = await deals_repo.get_by_url(url)
+                                 if not deal:
+                                     continue
+                                 
                                  # Update Outcome
                                  outcome = await deals_repo.get_outcome(deal.id)
                                  if not outcome:
                                      outcome = DealOutcome(deal_id=deal.id)
                                      session.add(outcome)
+                                     outcomes_created += 1
+                                 else:
+                                     outcomes_updated += 1
                                  
                                  temp = float(d.get("temperature", 0))
                                  current_max = outcome.final_max_temp if outcome.final_max_temp is not None else 0.0
@@ -219,17 +232,52 @@ class SchedulerService:
                                  if temp >= 500: outcome.reached_500 = 1
                                  if temp >= 1000: outcome.reached_1000 = 1
                                  
-                                 await session.commit()
+                             except Exception as e:
+                                 logger.error(f"📜 Historian: Error processing {url}: {e}")
+                                 continue
                          
-                         logger.info(f"📜 Historian: Analyzed {len(deals)} hot deals.")
+                         # Single commit at end
+                         await session.commit()
+                         logger.info(f"📜 Historian: ✅ {outcomes_created} nuevos, {outcomes_updated} actualizados de {len(deals)} hot deals.")
+                     else:
+                         logger.warning("📜 Historian: No se pudo obtener /las-mas-hot")
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"📜 Historian Error: {e}")
+                logger.error(f"📜 Historian Error: {e}", exc_info=True)
 
             if not self.shutdown_event.is_set():
                 await self._sleep(random.randint(7200, 14400)) # 2-4 hours
+
+    # --- 4. THE AUTOTUNER (Self-learning) ---
+    async def run_autotuner(self):
+        """Runs the AutoTuner every 6 hours to optimize scoring parameters."""
+        logger.info("🧠 AutoTuner loop started.")
+        # Wait 30 min before first run to let data accumulate
+        await self._sleep(1800)
+        
+        while not self.shutdown_event.is_set():
+            try:
+                logger.info("🧠 AutoTuner: Starting optimization cycle...")
+                async with async_session_factory() as session:
+                    deals_repo = DealsRepository(session)
+                    tuner = AutoTunerService(deals_repo)
+                    new_config = await tuner.optimize()
+                    
+                    if new_config:
+                        self.analyzer.update_config(new_config)
+                        logger.info(f"🧠 AutoTuner: ✅ Config updated with {len(new_config)} params.")
+                    else:
+                        logger.info("🧠 AutoTuner: No hay cambios suficientes para aplicar.")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"🧠 AutoTuner Error: {e}", exc_info=True)
+
+            if not self.shutdown_event.is_set():
+                await self._sleep(21600)  # 6 hours
 
     # --- Helpers ---
     async def _handle_viral_deal(self, deal: dict, analysis: dict, deals_repo: DealsRepository, sub_repo: SubscribersRepository):
