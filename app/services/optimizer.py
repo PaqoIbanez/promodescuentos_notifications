@@ -95,5 +95,8 @@ class AutoTunerService:
             else:
                 logger.info("⏹ No hay cambios suficientes para aplicar.")
 
+            return new_config
+
         except Exception as e:
             logger.error(f"Error en proceso de optimización: {e}")
+            return None

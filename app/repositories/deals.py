@@ -257,14 +257,13 @@ class DealsRepository:
                     value=str(val)
                 ).on_conflict_do_update(
                     index_elements=['key'],
-                    set_={'value': str(val)}
+                    set_={'value': str(val), 'updated_at': func.now()}
                 )
                 await self.session.execute(stmt)
             
             return True
         except Exception as e:
             logger.error(f"Error bulk updating system config: {e}")
-            raise
             raise
 
     async def get_by_url(self, url: str) -> Optional[Deal]:
