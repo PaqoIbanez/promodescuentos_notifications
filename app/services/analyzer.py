@@ -116,11 +116,25 @@ class AnalyzerService:
         # Convert current to same units (deg/min)
         current_velocity_min = current_velocity / 60
         
-        # Ratio: how much faster is the current interval vs historical average
-        ratio = current_velocity_min / prev_avg_velocity
+        # Dampen historical velocity to avoid huge multipliers from noise
+        # A tiny historical velocity (e.g. 0.1 deg/min) makes any newly gained
+        # 3 degrees look like a massive acceleration.
+        damped_prev_avg = max(prev_avg_velocity, 0.5)
         
+        # Ratio: how much faster is the current interval vs historical average
+        ratio = current_velocity_min / damped_prev_avg
+        
+        # Restrict maximum multiplier based on absolute temperature change
+        # A tiny jump of 3 degrees shouldn't give a 3x multiplier.
+        if delta_temp < 5:
+            max_mult = 1.1
+        elif delta_temp < 15:
+            max_mult = 1.5
+        else:
+            max_mult = 3.0
+            
         # Clamp to prevent noise from dominating
-        return max(0.5, min(3.0, ratio))
+        return max(0.5, min(max_mult, ratio))
 
     def get_current_mexico_hour(self) -> int:
         """Returns current hour in Mexico City timezone (UTC-6)."""
@@ -176,6 +190,14 @@ class AnalyzerService:
         
         # 4. Final composite score
         final_score = round(viral_score * traffic_mult * acceleration, 2)
+        
+        # 4.b Old & Cold Penalty (Heuristic Hotfix)
+        # Destroy the score of deals that have no statistical chance of reaching 500
+        if hours >= 2.0 and temp < 100:
+            final_score = round(final_score * 0.2, 2)
+        elif hours >= 1.0 and temp < 50:
+            final_score = round(final_score * 0.2, 2)
+            
         
         # 5. Hot detection
         threshold = self.config.get("viral_threshold", 50.0)
