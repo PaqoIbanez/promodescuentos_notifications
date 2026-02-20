@@ -254,8 +254,6 @@ class SchedulerService:
     async def run_autotuner(self):
         """Runs the AutoTuner every 6 hours to optimize scoring parameters."""
         logger.info("🧠 AutoTuner loop started.")
-        # Wait 30 min before first run to let data accumulate
-        await self._sleep(1800)
         
         while not self.shutdown_event.is_set():
             try:
