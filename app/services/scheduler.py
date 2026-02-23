@@ -147,7 +147,23 @@ class SchedulerService:
                                  if details.get("is_expired") or details.get("status") != "Activated":
                                      deal.is_active = 0
                                      deal.activity_status = "expired"
-                                     logger.info(f"👀 Tracker: Deal {deal.id} expired.")
+                                     logger.info(f"👀 Tracker: Deal {deal.id} expired. Guardando outcome...")
+                                     
+                                     # --- NUEVO: Registrar el fracaso/éxito final para el ML ---
+                                     outcome = await deals_repo.get_outcome(deal.id)
+                                     if not outcome:
+                                         outcome = DealOutcome(deal_id=deal.id)
+                                         session.add(outcome)
+                                     
+                                     # Buscar la temperatura máxima histórica que logró esta oferta antes de morir
+                                     max_temp_query = select(func.max(DealHistory.temperature)).where(DealHistory.deal_id == deal.id)
+                                     max_temp_result = await session.execute(max_temp_query)
+                                     final_max = max_temp_result.scalar() or 0.0
+                                     
+                                     outcome.final_max_temp = final_max
+                                     if final_max >= 200: outcome.reached_200 = 1
+                                     if final_max >= 500: outcome.reached_500 = 1
+                                     if final_max >= 1000: outcome.reached_1000 = 1
                                  
                                  # Update temperature/price in history
                                  # Calculate hours_since_posted

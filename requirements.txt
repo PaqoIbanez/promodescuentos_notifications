@@ -8,7 +8,7 @@ uvicorn
 httpx
 asyncpg
 sqlalchemy
-pydantic-settings
-fastapi
-uvicorn
-httpx
+pandas
+scikit-learn
+xgboost
+joblib
