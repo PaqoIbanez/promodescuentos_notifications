@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import joblib
 from xgboost import XGBRegressor
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 sys.path.append(os.getcwd())
@@ -59,18 +59,36 @@ async def extract_and_train():
 
     X_train, X_test, y_train_log, y_test_log = train_test_split(X, y_log, test_size=0.2, random_state=42)
 
-    logger.info("Entrenando modelo XGBoost Regressor...")
+    logger.info("Entrenando modelo XGBoost Regressor y buscando hiperparámetros con GridSearchCV...")
     
-    model = XGBRegressor(
-        n_estimators=150,
-        max_depth=4,           
-        learning_rate=0.05,    
-        random_state=42,
-        subsample=0.8,         # Ayuda a evitar que el modelo memorice
-        colsample_bytree=0.8   # Fuerzas al modelo a no depender de una sola variable
+    # 1. Definir el modelo base
+    xgb_base = XGBRegressor(random_state=42)
+    
+    # 2. Definir el espacio de búsqueda (Grid)
+    param_grid = {
+        'n_estimators': [50, 100, 150, 200],
+        'max_depth': [3, 4, 5, 6],
+        'learning_rate': [0.01, 0.05, 0.1, 0.2],
+        'subsample': [0.8, 1.0],
+        'colsample_bytree': [0.8, 1.0]
+    }
+    
+    # 3. Configurar GridSearchCV
+    grid_search = GridSearchCV(
+        estimator=xgb_base, 
+        param_grid=param_grid, 
+        cv=3, 
+        scoring='neg_mean_absolute_error',
+        n_jobs=-1, # Usar todos los núcleos
+        verbose=1
     )
     
-    model.fit(X_train, y_train_log)
+    logger.info("Probando combinaciones...")
+    grid_search.fit(X_train, y_train_log)
+    
+    # 4. Obtener el mejor modelo
+    model = grid_search.best_estimator_
+    logger.info(f"Mejores parámetros encontrados: {grid_search.best_params_}")
 
     # 3. Evaluar el modelo (Revirtiendo el logaritmo)
     predictions_log = model.predict(X_test)

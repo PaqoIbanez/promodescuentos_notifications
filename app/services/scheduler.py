@@ -17,7 +17,7 @@ from app.services.analyzer import AnalyzerService
 from app.services.optimizer import AutoTunerService
 from app.services.deals import DealsService
 from app.services.telegram import TelegramService
-from app.models.deals import Deal, DealOutcome
+from app.models.deals import Deal, DealOutcome, DealHistory
 
 logger = logging.getLogger(__name__)
 
@@ -141,42 +141,58 @@ class SchedulerService:
                          
                          html = await self.scraper.fetch_page(deal.url)
                          if html:
+                             if html == "<HTTP_UNDER_REVIEW>":
+                                 logger.info(f"👀 Tracker: Deal {deal.id} is under review (404). Waiting for approval...")
+                                 continue
+                             elif html.startswith("<HTTP_ERROR_"):
+                                 logger.info(f"👀 Tracker: Deal {deal.id} is dead/deleted/rejected ({html}). Deactivating.")
+                                 await deals_repo.update_activity_status(deal.id, 0, "deleted")
+                                 await session.commit()
+                                 continue
+                             
                              details = await asyncio.to_thread(self.scraper.parse_deal_detail, html)
                              if details:
-                                 # Update logic
+                                 # Calculate hours_since_posted
+                                 hours_since_posted = deal.history[-1].hours_since_posted if deal.history else 0
+                                 if details.get("published_at"):
+                                     hours_since_posted = (time.time() - float(details["published_at"])) / 3600
+                                 details["hours_since_posted"] = hours_since_posted
+                                 
+                                 temp = float(details.get("temperature", 0))
+                                 
+                                 # Update logic: is it dead/expired or frozen cold?
+                                 is_dead = False
+                                 status_reason = ""
+                                 
                                  if details.get("is_expired") or details.get("status") != "Activated":
-                                     deal.is_active = 0
-                                     deal.activity_status = "expired"
-                                     logger.info(f"👀 Tracker: Deal {deal.id} expired. Guardando outcome...")
+                                     is_dead = True
+                                     status_reason = "expired"
+                                 elif hours_since_posted >= 2.0 and temp < 150:
+                                     is_dead = True
+                                     status_reason = "frozen_cold"
+                                     logger.info(f"👀 Tracker: Deal {deal.id} is dead cold ({temp}° at {hours_since_posted:.1f}h). Freezing.")
                                      
-                                     # --- NUEVO: Registrar el fracaso/éxito final para el ML ---
+                                 if is_dead:
+                                     deal.is_active = 0
+                                     deal.activity_status = status_reason
+                                     if status_reason == "expired":
+                                         logger.info(f"👀 Tracker: Deal {deal.id} expired. Guardando outcome...")
+                                     
+                                     # --- Registrar el fracaso/éxito final para el ML ---
                                      outcome = await deals_repo.get_outcome(deal.id)
                                      if not outcome:
                                          outcome = DealOutcome(deal_id=deal.id)
                                          session.add(outcome)
                                      
-                                     # Buscar la temperatura máxima histórica que logró esta oferta antes de morir
+                                     # Buscar la temperatura máxima histórica
                                      max_temp_query = select(func.max(DealHistory.temperature)).where(DealHistory.deal_id == deal.id)
                                      max_temp_result = await session.execute(max_temp_query)
                                      final_max = max_temp_result.scalar() or 0.0
                                      
-                                     outcome.final_max_temp = final_max
-                                     if final_max >= 200: outcome.reached_200 = 1
-                                     if final_max >= 500: outcome.reached_500 = 1
-                                     if final_max >= 1000: outcome.reached_1000 = 1
-                                 
-                                 # Update temperature/price in history
-                                 # Calculate hours_since_posted
-                                 hours_since_posted = deal.history[-1].hours_since_posted if deal.history else 0 # Fallback
-                                 if details.get("published_at"):
-                                     hours_since_posted = (time.time() - float(details["published_at"])) / 3600
-                                 elif deal.created_at: 
-                                      # Rough estimate if published_at missing (though Deal usually parses it)
-                                      # Note: created_at is naive or timezone aware? SQLAlchemy usually returns datetime
-                                      # Let's trust scraper data mostly.
-                                      pass
-
-                                 details["hours_since_posted"] = hours_since_posted
+                                     outcome.final_max_temp = max(final_max, temp)
+                                     if outcome.final_max_temp >= 200: outcome.reached_200 = 1
+                                     if outcome.final_max_temp >= 500: outcome.reached_500 = 1
+                                     if outcome.final_max_temp >= 1000: outcome.reached_1000 = 1
 
                                  await deals_repo.save_history(
                                      deal.id, 
@@ -315,19 +331,18 @@ class SchedulerService:
             
             await deals_repo.update_max_rating(url, curr_rating)
             
-            # Prepare notification data
-            notification_data = {
-                "title": title,
-                "url": url,
-                "price_display": deal.get("price") if deal.get("price") else "N/D",
+            # Prepare notification data (pass all extracted fields)
+            notification_data = deal.copy()
+            notification_data.update({
                 "rating": curr_rating,
-                "image_url": deal.get("image_url"),
-                "merchant": deal.get("merchant"),
-                "description": deal.get("description"),
-                "posted_or_updated": "Publicado", 
+                "posted_or_updated": deal.get("posted_or_updated", "Publicado"),
                 "hours_since_posted": deal.get("hours_since_posted", 0.1),
-                "temperature": deal.get("temperature", 0)
-            }
+                "temperature": deal.get("temperature", 0),
+            })
+            
+            # Ensure price_display has a fallback
+            if not notification_data.get("price_display"):
+                notification_data["price_display"] = deal.get("price", "N/D")
             
             await self.telegram.send_bulk_notifications(targets, notification_data)
 

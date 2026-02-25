@@ -66,6 +66,12 @@ class ScraperService:
                 
                 elif 400 <= response.status_code < 500:
                         logger.error(f"Client error {response.status_code} fetching {url}. Not retrying.")
+                        body = response.text.lower() if response.text else ""
+                        if response.status_code in (404, 410):
+                            if "en revisión" in body or "en revision" in body:
+                                logger.info(f"Page {url} is under review (404/410). Returning special flag.")
+                                return "<HTTP_UNDER_REVIEW>"
+                            return f"<HTTP_ERROR_{response.status_code}>"
                         return None
                 else:
                     logger.warning(f"Server error {response.status_code} fetching {url}.")
@@ -318,7 +324,20 @@ class ScraperService:
             data["thread_id"] = thread_detail.get("threadId")
             data["title"] = thread_detail.get("title")
             data["url"] = thread_detail.get("url") or thread_detail.get("shareableLink")
+            
+            # Price, Discount, and Coupon
             data["price"] = thread_detail.get("price")
+            try:
+                price_val = float(data["price"]) if data.get("price") is not None else 0.0
+                data["price_display"] = f"${price_val:,.2f}" if price_val > 0 else thread_detail.get("priceDisplay")
+                if not data["price_display"]:
+                    data["price_display"] = "Gratis" if data.get("price") == 0 else None
+            except:
+                data["price_display"] = thread_detail.get("priceDisplay")
+                
+            data["discount_percentage"] = thread_detail.get("discountPercentage")
+            data["coupon_code"] = thread_detail.get("voucherCode")
+            
             data["temperature"] = thread_detail.get("temperature")
             data["description"] = thread_detail.get("descriptionPurified")
             

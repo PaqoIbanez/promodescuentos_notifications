@@ -331,3 +331,16 @@ class DealsRepository:
         except Exception as e:
             logger.error(f"Error fetching training dataset: {e}")
             return []
+
+    async def update_activity_status(self, deal_id: int, is_active: int, status: str) -> bool:
+        """Updates a deal's activity status (e.g. to stop tracking deleted deals)."""
+        try:
+            stmt = update(Deal).where(Deal.id == deal_id).values(
+                is_active=is_active, 
+                activity_status=status
+            )
+            await self.session.execute(stmt)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating activity for deal {deal_id}: {e}")
+            return False

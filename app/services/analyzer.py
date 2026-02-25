@@ -152,13 +152,10 @@ class AnalyzerService:
             
         threshold = self.config.get("viral_threshold", 50.0)
         is_hot_heuristic = final_score >= threshold
-        rating = self._score_to_rating(final_score)
+
 
         # --- 2. PREDICCIÓN MACHINE LEARNING (REGRESIÓN LOGARÍTMICA) ---
         predicted_max_temp = 0.0
-        ml_probability = 0.0
-        is_hot_ml = False
-        rating_ml = 0
 
         if self.model is not None and hours >= 0.16:
             try:
@@ -174,32 +171,20 @@ class AnalyzerService:
                 
                 # 2. Descomprimimos usando la exponencial para obtener los grados reales
                 predicted_max_temp = float(np.expm1(predicted_log))
-                
-                threshold = self.config.get("viral_threshold", 50.0)
-                if predicted_max_temp >= threshold:
-                    is_hot_ml = True
-                    if predicted_max_temp >= 500.0:
-                        rating_ml = 4  
-                    elif predicted_max_temp >= 200.0:
-                        rating_ml = 3  
-                    elif predicted_max_temp >= 100.0:
-                        rating_ml = 2  
-                    else:
-                        rating_ml = 1  
                     
             except Exception as e:
                 logger.error(f"Error procesando predicción ML para {deal.get('url')}: {e}")
 
-        # --- DECISIÓN FINAL UNIFICADA (ML EN MODO SOMBRA) ---
-        # 1. La heurística recupera el control absoluto de Telegram
-        final_is_hot = is_hot_heuristic
-        final_rating = rating
+        # --- DECISIÓN FINAL UNIFICADA (DUAL-TRIGGER) ---
+        # 1. Asignar Ranking de 1 a 5 Fuegos basado en Predicción ML o Temperatura Real Temprana
+        final_rating = self._calculate_dual_trigger_rating(predicted_max_temp, temp, hours)
         
-        # 2. El ML solo se usa como observador en los logs
-        if self.model is not None and hours >= 0.16:
-            if is_hot_ml:
-                # Usamos una etiqueta [SHADOW ML] para monitorearlo sin que dispare mensajes
-                logger.info(f"🤖 [SHADOW ML] Proyecta {predicted_max_temp:.1f}° -> {deal.get('title')}")
+        # 2. Es Hot si consiguió al menos 1 🔥
+        final_is_hot = final_rating > 0
+        
+        # 3. Loguear detecciones
+        if final_is_hot:
+            logger.info(f"🚀 [DUAL-TRIGGER] {final_rating}🔥 | Proyecta {predicted_max_temp:.1f}° | Real: {temp}° @ {hours:.2f}h -> {deal.get('title')}")
 
         return {
             "viral_score": viral_score,
@@ -211,15 +196,25 @@ class AnalyzerService:
             "ml_probability": round(predicted_max_temp, 2)
         }
 
-    def _score_to_rating(self, score: float) -> int:
-        tier4 = self.config.get("score_tier_4", 500.0)
-        tier3 = self.config.get("score_tier_3", 200.0)
-        tier2 = self.config.get("score_tier_2", 100.0)
+    def _calculate_dual_trigger_rating(self, predicted_max_temp: float, temp: float, hours: float) -> int:
+        """
+        Calcula el rating (1-5 fuegos) usando la estrategia Dual-Trigger:
+        1. Radar Temprano (ML XGBoost): Lo que predicen las matemáticas a futuro.
+        2. Red de Seguridad (Empírico): Si en menos de 1 hora explotó en la vida real.
+        """
+        is_early = hours <= 1.0
         
-        if score >= tier4: return 4
-        elif score >= tier3: return 3
-        elif score >= tier2: return 2
-        elif score > 0: return 1
+        if predicted_max_temp >= 1499.0 or (is_early and temp >= 500.0):
+            return 5
+        elif predicted_max_temp >= 999.0 or (is_early and temp >= 400.0):
+            return 4
+        elif predicted_max_temp >= 799.0 or (is_early and temp >= 300.0):
+            return 3
+        elif predicted_max_temp >= 499.0 or (is_early and temp >= 200.0):
+            return 2
+        elif predicted_max_temp >= 299.0 or (is_early and temp >= 150.0):
+            return 1
+            
         return 0
 
     def is_deal_hot(self, deal: Dict[str, Any], prev_snapshot: Optional[Tuple[float, float]] = None) -> bool:
