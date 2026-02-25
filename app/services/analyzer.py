@@ -200,19 +200,23 @@ class AnalyzerService:
         """
         Calcula el rating (1-5 fuegos) usando la estrategia Dual-Trigger:
         1. Radar Temprano (ML XGBoost): Lo que predicen las matemáticas a futuro.
+           REQUIERE al menos 50° reales para confiar en la predicción.
         2. Red de Seguridad (Empírico): Si en menos de 1 hora explotó en la vida real.
         """
         is_early = hours <= 1.0
         
-        if predicted_max_temp >= 1499.0 or (is_early and temp >= 500.0):
+        # El ML solo es confiable si la oferta ya tiene tracción real mínima
+        ml_trusted = predicted_max_temp if temp >= 50.0 else 0.0
+        
+        if ml_trusted >= 1499.0 or (is_early and temp >= 500.0):
             return 5
-        elif predicted_max_temp >= 999.0 or (is_early and temp >= 400.0):
+        elif ml_trusted >= 999.0 or (is_early and temp >= 400.0):
             return 4
-        elif predicted_max_temp >= 799.0 or (is_early and temp >= 300.0):
+        elif ml_trusted >= 799.0 or (is_early and temp >= 300.0):
             return 3
-        elif predicted_max_temp >= 499.0 or (is_early and temp >= 200.0):
+        elif ml_trusted >= 499.0 or (is_early and temp >= 200.0):
             return 2
-        elif predicted_max_temp >= 299.0 or (is_early and temp >= 150.0):
+        elif ml_trusted >= 299.0 or (is_early and temp >= 150.0):
             return 1
             
         return 0
