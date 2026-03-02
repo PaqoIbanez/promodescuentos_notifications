@@ -3,6 +3,7 @@ import math
 import logging
 import numpy as np
 import joblib
+import re
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 
@@ -26,6 +27,7 @@ class AnalyzerService:
     def __init__(self, system_config: Dict[str, float]):
         self.config = system_config
         self.model = self._load_model()
+        self.merchant_encoder = self._load_merchant_encoder()
 
     def _load_model(self):
         """Carga el modelo XGBoost desde el disco si existe."""
@@ -38,6 +40,16 @@ class AnalyzerService:
                 logger.error(f"Error cargando el modelo ML: {e}")
         else:
             logger.warning(f"No se encontró {model_path}. Funcionando en modo Heurístico tradicional.")
+        return None
+
+    def _load_merchant_encoder(self):
+        """Carga el diccionario de Target Encoding para los comercios."""
+        encoder_path = os.path.join(os.getcwd(), "merchant_encoder.joblib")
+        if os.path.exists(encoder_path):
+            try:
+                return joblib.load(encoder_path)
+            except Exception as e:
+                logger.error(f"Error cargando el merchant_encoder: {e}")
         return None
 
     def update_config(self, new_config: Dict[str, float]):
@@ -164,7 +176,26 @@ class AnalyzerService:
                 hour_cos = np.cos(2 * np.pi * mexico_hour / 24)
                 dow = datetime.now().weekday() + 1 
                 
-                features = np.array([[temp, velocity, hour_sin, hour_cos, dow]])
+                # --- NUEVAS FEATURES (Phase 4) ---
+                title = str(deal.get("title", "")).lower()
+                title_length = len(title)
+                has_bug = 1 if re.search(r'bug|error|equivocacion', title) else 0
+                has_free = 1 if re.search(r'gratis|regalo', title) else 0
+                is_apple = 1 if re.search(r'apple|iphone|ipad|mac|airpods', title) else 0
+                
+                merchant = deal.get("merchant", "N/D")
+                if not merchant: merchant = "N/D"
+                
+                merchant_encoded = 0.0
+                if self.merchant_encoder:
+                    means = self.merchant_encoder.get("means", {})
+                    global_mean = self.merchant_encoder.get("global_mean", 0.0)
+                    merchant_encoded = means.get(merchant, global_mean)
+                
+                features = np.array([[
+                    temp, velocity, hour_sin, hour_cos, dow,
+                    title_length, has_bug, has_free, is_apple, merchant_encoded
+                ]])
                 
                 # 1. El modelo devuelve la predicción comprimida (ej. 6.2)
                 predicted_log = float(self.model.predict(features)[0])

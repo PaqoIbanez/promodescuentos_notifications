@@ -19,17 +19,29 @@ class DealsRepository:
         Does NOT commit.
         """
         try:
+            # Safely process numeric values
+            def parse_float(val):
+                if not val: return None
+                try: return float(str(val).replace(",", "").replace("%", "").strip())
+                except: return None
+                
             stmt = insert(Deal).values(
                 url=deal_data.get("url"),
                 title=deal_data.get("title"),
                 merchant=deal_data.get("merchant", ""),
                 image_url=deal_data.get("image_url", ""),
+                price=parse_float(deal_data.get("price")),
+                discount_percentage=parse_float(deal_data.get("discount_percentage")),
+                has_coupon=1 if deal_data.get("has_coupon") else 0,
             ).on_conflict_do_update(
                 index_elements=['url'],
                 set_={
                     'title': deal_data.get("title"),
                     'merchant': deal_data.get("merchant", ""),
-                    'image_url': deal_data.get("image_url", "")
+                    'image_url': deal_data.get("image_url", ""),
+                    'price': parse_float(deal_data.get("price")),
+                    'discount_percentage': parse_float(deal_data.get("discount_percentage")),
+                    'has_coupon': 1 if deal_data.get("has_coupon") else 0,
                 }
             ).returning(Deal.id)
 
@@ -317,7 +329,9 @@ class DealsRepository:
                     doc.final_max_temp,
                     doc.reached_500,
                     extract(ISODOW from d.created_at) as dow,
-                    extract(HOUR from d.created_at) as hour_of_day
+                    extract(HOUR from d.created_at) as hour_of_day,
+                    d.merchant,
+                    d.title
                 FROM TargetSnapshots ts
                 JOIN deal_outcomes doc ON doc.deal_id = ts.deal_id
                 JOIN deals d ON d.id = ts.deal_id

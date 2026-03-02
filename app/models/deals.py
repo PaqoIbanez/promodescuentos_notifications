@@ -10,6 +10,9 @@ class Deal(Base):
     title = Column(String)
     merchant = Column(String)
     image_url = Column(String)
+    price = Column(Float, nullable=True)
+    discount_percentage = Column(Float, nullable=True)
+    has_coupon = Column(Integer, default=0)
     max_seen_rating = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     

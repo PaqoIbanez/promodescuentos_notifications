@@ -36,13 +36,44 @@ async def extract_and_train():
 
     df['hour_sin'] = np.sin(2 * np.pi * df['hour_of_day'] / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df['hour_of_day'] / 24)
+    df['title'] = df['title'].fillna("").str.lower()
+    df['title_length'] = df['title'].str.len()
+    df['has_bug'] = df['title'].str.contains('bug|error|equivocacion', regex=True).astype(int)
+    df['has_free'] = df['title'].str.contains('gratis|regalo', regex=True).astype(int)
+    df['is_apple'] = df['title'].str.contains('apple|iphone|ipad|mac|airpods', regex=True).astype(int)
+
+    # Target Encoding for Merchant
+    df['merchant'] = df['merchant'].fillna('N/D')
+    global_mean = df['final_max_temp'].mean()
+    merchant_means = df.groupby('merchant')['final_max_temp'].mean().to_dict()
+    merchant_counts = df.groupby('merchant').size()
     
+    # Suavizado: Si el merchant tiene menos de 5 registros, asume la media global
+    for m in merchant_means:
+        if merchant_counts[m] < 5:
+            merchant_means[m] = global_mean
+            
+    df['merchant_encoded'] = df['merchant'].map(merchant_means).fillna(global_mean)
+    
+    encoder_data = {
+        "means": merchant_means,
+        "global_mean": global_mean
+    }
+    encoder_path = os.path.join(os.getcwd(), "merchant_encoder.joblib")
+    joblib.dump(encoder_data, encoder_path)
+    logger.info(f"Merchant Encoder entrenado y guardado en: {encoder_path}")
+
     features = [
         'temp_at_checkpoint', 
         'velocity_at_checkpoint', 
         'hour_sin', 
         'hour_cos', 
-        'dow'
+        'dow',
+        'title_length',
+        'has_bug',
+        'has_free',
+        'is_apple',
+        'merchant_encoded'
     ]
     
     target = 'final_max_temp' 

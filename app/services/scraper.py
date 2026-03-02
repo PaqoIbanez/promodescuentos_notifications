@@ -182,19 +182,23 @@ class ScraperService:
 
         # --- 4. Price ---
         deal_info["price_display"] = None
+        deal_info["price"] = None
         try:
             if vue_data and "price" in vue_data:
                  try:
                      price_val = float(vue_data["price"])
+                     deal_info["price"] = price_val
                      deal_info["price_display"] = f"${price_val:,.2f}" if price_val > 0 else "Gratis"
                  except: 
                      deal_info["price_display"] = vue_data.get("priceDisplay")
+                     deal_info["price"] = vue_data.get("priceDisplay")
             
             if not deal_info["price_display"]:
                  # HTML Fallback
                  price_el = art.select_one(".thread-price")
                  if price_el:
                      deal_info["price_display"] = price_el.get_text(strip=True)
+                     deal_info["price"] = deal_info["price_display"]
         except Exception as e:
             logger.debug(f"Error extracting Price: {e}")
 
@@ -231,10 +235,13 @@ class ScraperService:
         
         # --- 7. Coupon ---
         deal_info["coupon_code"] = vue_data.get("voucherCode")
+        deal_info["has_coupon"] = bool(deal_info["coupon_code"])
         try:
             if not deal_info["coupon_code"]:
                  coupon_el = art.select_one(".voucher .buttonWithCode-code")
-                 if coupon_el: deal_info["coupon_code"] = coupon_el.get_text(strip=True)
+                 if coupon_el: 
+                     deal_info["coupon_code"] = coupon_el.get_text(strip=True)
+                     deal_info["has_coupon"] = True
         except Exception as e:
             logger.debug(f"Error extracting Coupon: {e}")
 
