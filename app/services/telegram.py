@@ -64,7 +64,7 @@ class TelegramService:
         """
         Envía notificaciones a múltiples usuarios de forma concurrente pero controlada.
         """
-        if not chat_ids:
+        if not chat_ids or deal_data.get('rating') < 2:
             return
 
         semaphore = asyncio.Semaphore(10) # Limit concurrent requests to prevent 429s
